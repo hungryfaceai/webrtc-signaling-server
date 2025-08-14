@@ -1,35 +1,29 @@
-// server.js — tiny Express + WS relay with logs
+// server.js — ultra-minimal Express + WebSocket relay with verbose logs
 import express from 'express';
 import { WebSocketServer } from 'ws';
-import path from 'path';
-import { fileURLToPath } from 'url';
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname  = path.dirname(__filename);
 
 const PORT    = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
 
 const app = express();
+app.get('/', (_req, res) => res.send(`OK (WS at ${WS_PATH})`));
+app.get('/health', (_req, res) => res.send('ok'));
 
-// optional index for sanity
-app.get('/', (_req, res) => {
-  res.type('html').send(`<!doctype html><meta charset="utf-8">
-  <style>body{font:14px system-ui;background:#000;color:#ddd;padding:24px}</style>
-  <h1>Signaling up</h1>
-  <p>WS: <code>${WS_PATH}?room=&lt;name&gt;</code></p>`);
+// in-memory rooms
+const rooms = new Map(); // roomId -> Set<ws>
+
+app.get('/rooms', (_req, res) => {
+  const json = {};
+  for (const [room, set] of rooms) json[room] = [...set].map(ws => ws.id);
+  res.json(json);
 });
 
-// health for Render
-app.get('/health', (_req, res) => res.status(200).send('ok'));
+const server = app.listen(PORT, () => {
+  console.log(`HTTP :${PORT}  | WS path: ${WS_PATH}`);
+});
 
-// start http
-const server = app.listen(PORT, () => console.log(`HTTP :${PORT}`));
-
-// ---- WS ----
-const rooms = new Map(); // roomId -> Set<ws>
+// ---- WebSocket ----
 const wss = new WebSocketServer({ server, path: WS_PATH });
-
 const uid = () => Math.random().toString(36).slice(2, 9);
 
 wss.on('connection', (ws, req) => {
@@ -37,12 +31,11 @@ wss.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.on('pong', () => (ws.isAlive = true));
 
-  console.log(`[WS] connect id=${ws.id} ip=${req.socket.remoteAddress}`);
+  console.log(`[WS] CONNECT id=${ws.id} ip=${req.socket.remoteAddress} url=${req.url}`);
 
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
-
     const t = msg?.type;
 
     if (t === 'join' && typeof msg.room === 'string') {
@@ -50,10 +43,9 @@ wss.on('connection', (ws, req) => {
       ws.roomId = roomId;
       if (!rooms.has(roomId)) rooms.set(roomId, new Set());
       rooms.get(roomId).add(ws);
-      const peers = rooms.get(roomId).size;
-      console.log(`[JOIN] id=${ws.id} room=${roomId} peers=${peers}`);
+      console.log(`[JOIN] id=${ws.id} room=${roomId} peers=${rooms.get(roomId).size}`);
 
-      // notify others (helps clients know someone arrived)
+      // tell the other peers someone arrived (helps client-side retries)
       broadcast(ws, { type: 'peer-joined', room: roomId, ts: Date.now() });
       return;
     }
@@ -63,16 +55,8 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // relay to others in same room
-    const peers = rooms.get(ws.roomId) || new Set();
-    let sent = 0;
-    for (const peer of peers) {
-      if (peer !== ws && peer.readyState === peer.OPEN) {
-        peer.send(raw);
-        sent++;
-      }
-    }
-    // msg.type may be "offer" / "answer" / "candidate" / "need-offer" etc.
+    // relay to all other peers in the same room
+    const sent = broadcast(ws, msg);
     console.log(`[RELAY] room=${ws.roomId} type=${t} from=${ws.id} to=${sent}`);
   });
 
@@ -90,7 +74,7 @@ wss.on('connection', (ws, req) => {
   });
 });
 
-// heartbeat (keeps connections tidy)
+// heartbeat to prune dead sockets (keeps logs tidy)
 setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
@@ -100,12 +84,16 @@ setInterval(() => {
 }, 30000);
 
 function broadcast(sender, obj) {
-  const roomId = sender.roomId;
-  if (!roomId || !rooms.has(roomId)) return;
+  const { roomId } = sender;
+  if (!roomId || !rooms.has(roomId)) return 0;
   const raw = JSON.stringify(obj);
   let sent = 0;
   for (const peer of rooms.get(roomId)) {
     if (peer !== sender && peer.readyState === peer.OPEN) { peer.send(raw); sent++; }
   }
-  console.log(`[BCAST] room=${roomId} type=${obj.type} from=${sender.id} to=${sent}`);
+  return sent;
 }
+
+// catch unexpected crashes in logs
+process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
+process.on('uncaughtException', (e)  => console.error('[uncaughtException]', e));
