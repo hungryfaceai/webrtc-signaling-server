@@ -73,7 +73,7 @@ wss.on('connection', (ws, req) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
     const t = msg?.type;
-
+    /*
     if (t === 'join' && typeof msg.room === 'string') {
       const roomId = msg.room.trim();
       ws.roomId = roomId;
@@ -86,6 +86,36 @@ wss.on('connection', (ws, req) => {
       broadcast(roomId, { type: 'peer-joined', id: ws.id, role: ws.role }, ws);
       const r = roster(roomId);
       broadcast(roomId, { type: 'roster', peers: r });
+      ws.send(JSON.stringify({ type: 'roster', peers: r }));
+      return;
+    }
+    */
+    if (t === 'join' && typeof msg.room === 'string') {
+      const nextRoom = msg.room.trim();
+      const prevRoom = ws.roomId;
+    
+      // If switching rooms, leave the previous one cleanly
+      if (prevRoom && prevRoom !== nextRoom && rooms.has(prevRoom)) {
+        const prevSet = rooms.get(prevRoom);
+        prevSet.delete(ws);
+        if (prevSet.size === 0) {
+          rooms.delete(prevRoom);
+        } else {
+          broadcast(prevRoom, { type: 'peer-left', id: ws.id });
+          broadcast(prevRoom, { type: 'roster', peers: roster(prevRoom) });
+        }
+      }
+    
+      ws.roomId = nextRoom;
+      ws.role = (msg.role === 'sender') ? 'sender' : 'receiver';
+    
+      getRoomSet(nextRoom).add(ws);
+      console.log(`[JOIN] id=${ws.id} role=${ws.role} room=${nextRoom} peers=${rooms.get(nextRoom).size}`);
+    
+      // Tell others in the new room, and send the roster once to the joiner
+      broadcast(nextRoom, { type: 'peer-joined', id: ws.id, role: ws.role }, ws);
+      const r = roster(nextRoom);
+      broadcast(nextRoom, { type: 'roster', peers: r }, ws);   // exclude joiner to avoid duplicate
       ws.send(JSON.stringify({ type: 'roster', peers: r }));
       return;
     }
