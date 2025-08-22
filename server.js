@@ -45,13 +45,18 @@ function broadcast(roomId, obj, exclude) {
   for (const s of set) {
     if (s !== exclude && s.readyState === s.OPEN) { s.send(raw); sent++; }
   }
+  console.log(`[RELAY][broadcast] room=${roomId} type=${obj.type} from=${obj.from || '-'} sent=${sent}`);
   return sent;
 }
 function sendTo(roomId, peerId, obj) {
   const set = rooms.get(roomId);
   if (!set) return false;
   for (const s of set) {
-    if (s.id === peerId && s.readyState === s.OPEN) { s.send(JSON.stringify(obj)); return true; }
+    if (s.id === peerId && s.readyState === s.OPEN) { 
+      s.send(JSON.stringify(obj)); 
+      console.log(`[RELAY][direct] room=${roomId} type=${obj.type} from=${obj.from || '-'} to=${peerId}`);
+      return true; 
+    }
   }
   return false;
 }
