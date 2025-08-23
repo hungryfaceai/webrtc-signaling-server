@@ -5,17 +5,29 @@
 import express from 'express';
 import { WebSocketServer } from 'ws';
 import { randomUUID } from 'crypto';
+import cors from 'cors';
 
 const PORT    = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
 
 const app = express();
+
+const ALLOWED_ORIGINS = ['https://hungryfaceai.github.io', 'http://localhost:3000'];
+app.use(cors({
+  origin: (origin, cb) => cb(null, !origin || ALLOWED_ORIGINS.includes(origin)),
+  methods: ['GET', 'OPTIONS'],
+  allowedHeaders: ['Content-Type'],
+  maxAge: 86400,
+  credentials: false
+}));
+
 app.get('/', (_req, res) => res.send(`OK (WS at ${WS_PATH})`));
 app.get('/health', (_req, res) => res.send('ok'));
 
 // in-memory rooms
 const rooms = new Map(); // roomId -> Set<ws>
 
+app.options('/rooms', cors()); // handle preflight (safe even if not strictly needed)
 app.get('/rooms', (_req, res) => {
   const json = {};
   for (const [room, set] of rooms) json[room] = [...set].map(ws => ({ id: ws.id, role: ws.role }));
