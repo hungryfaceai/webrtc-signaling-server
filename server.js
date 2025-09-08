@@ -132,7 +132,7 @@ wss.on('connection', (ws, req) => {
     }
     // 2) Pairing messages (relay by fingerprint)
     //if ((t === 'pair-init' || t === 'pair-ack') && typeof msg.to === 'string') {
-	if ((t === 'pair-init' || t === 'pair-ack' || t === 'pair-done') && typeof msg.to === 'string')
+	if ((t === 'pair-init' || t === 'pair-ack' || t === 'pair-done') && typeof msg.to === 'string') {
       deliverFp(msg.to, msg);
       return;
     }
