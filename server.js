@@ -1,6 +1,8 @@
 // server.js — Express + WebSocket signaling with rooms + targeted routing
+// Adds fingerprint relay for roomless pairing/signaling.
 // Emits: hello(id), roster(peers[{id,role}]), peer-joined/peer-left
-// Forwards: offer/answer/candidate/bye/need-offer (adds {from}; honors {to})
+// Forwards (rooms): offer/answer/candidate/bye/need-offer (adds {from}; honors {to})
+// Forwards (roomless): register(fp), relay({to:fp,...}), pair-init/pair-ack
 
 import express from 'express';
 import { WebSocketServer } from 'ws';
@@ -27,7 +29,23 @@ app.get('/health', (_req, res) => res.send('ok'));
 // in-memory rooms
 const rooms = new Map(); // roomId -> Set<ws>
 
-app.options('/rooms', cors()); // handle preflight (safe even if not strictly needed)
+// NEW: fingerprint routing + mailbox (roomless)
+const fpClients = new Map();      // fingerprint -> ws
+const mailbox   = new Map();      // fingerprint -> [pending messages]
+
+function deliverFp(toFp, obj) {
+  const ws = fpClients.get(toFp);
+  if (ws && ws.readyState === ws.OPEN) {
+    ws.send(JSON.stringify(obj));
+    return true;
+  }
+  const q = mailbox.get(toFp) || [];
+  q.push(obj);
+  mailbox.set(toFp, q);
+  return false;
+}
+
+app.options('/rooms', cors());
 app.get('/rooms', (_req, res) => {
   const json = {};
   for (const [room, set] of rooms) json[room] = [...set].map(ws => ({ id: ws.id, role: ws.role }));
@@ -57,7 +75,7 @@ function broadcast(roomId, obj, exclude) {
   for (const s of set) {
     if (s !== exclude && s.readyState === s.OPEN) { s.send(raw); sent++; }
   }
-  console.log(`[RELAY][broadcast] room=${roomId} type=${obj.type} from=${obj.from || '-'} sent=${sent}`);
+  console.log(`[RELAY][broadcast] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} sent=${sent}`);
   return sent;
 }
 function sendTo(roomId, peerId, obj) {
@@ -66,7 +84,7 @@ function sendTo(roomId, peerId, obj) {
   for (const s of set) {
     if (s.id === peerId && s.readyState === s.OPEN) { 
       s.send(JSON.stringify(obj)); 
-      console.log(`[RELAY][direct] room=${roomId} type=${obj.type} from=${obj.from || '-'} to=${peerId}`);
+      console.log(`[RELAY][direct] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} to=${peerId}`);
       return true; 
     }
   }
@@ -78,6 +96,7 @@ wss.on('connection', (ws, req) => {
   ws.roomId = null;
   ws.role = 'receiver';
   ws.isAlive = true;
+  ws.fingerprint = null; // NEW
 
   console.log(`[WS] CONNECT id=${ws.id} ip=${req.socket.remoteAddress} url=${req.url}`);
 
@@ -89,29 +108,50 @@ wss.on('connection', (ws, req) => {
   ws.on('message', (raw) => {
     let msg;
     try { msg = JSON.parse(raw); } catch { return; }
-    const t = msg?.type;
-    /*
-    if (t === 'join' && typeof msg.room === 'string') {
-      const roomId = msg.room.trim();
-      ws.roomId = roomId;
-      ws.role = (msg.role === 'sender') ? 'sender' : 'receiver';
+						
+	  
+													   
+									 
+						 
+																
 
-      getRoomSet(roomId).add(ws);
-      console.log(`[JOIN] id=${ws.id} role=${ws.role} room=${roomId} peers=${rooms.get(roomId).size}`);
+    // Accept both {type: "..."} and {op: "..."} messages
+    const t = msg?.type || msg?.op;
 
-      // notify everyone + send rosters
-      broadcast(roomId, { type: 'peer-joined', id: ws.id, role: ws.role }, ws);
-      const r = roster(roomId);
-      broadcast(roomId, { type: 'roster', peers: r });
-      ws.send(JSON.stringify({ type: 'roster', peers: r }));
+    // ===== ROOMLESS FLOW (no join needed) =====
+    // 1) Register fingerprint
+    if (t === 'register' && typeof msg.fp === 'string') {
+      ws.fingerprint = msg.fp;
+      fpClients.set(ws.fingerprint, ws);
+      // flush mailbox
+      const q = mailbox.get(ws.fingerprint) || [];
+      mailbox.delete(ws.fingerprint);
+      for (const mm of q) try { ws.send(JSON.stringify(mm)); } catch {}
+      console.log(`[REGISTER] fp=${ws.fingerprint} id=${ws.id}`);
       return;
     }
-    */
+    // 2) Pairing messages (relay by fingerprint)
+    if ((t === 'pair-init' || t === 'pair-ack') && typeof msg.to === 'string') {
+      deliverFp(msg.to, msg);
+      return;
+    }
+    // 3) Encrypted signaling relay (by fingerprint)
+    if (t === 'relay' && typeof msg.to === 'string') {
+      deliverFp(msg.to, msg);
+      return;
+    }
+    // (Optional keepalive passthrough)
+    if (t === 'keepalive' || t === 'ping' || t === 'pong') {
+      try { ws.send(JSON.stringify({ type: 'pong' })); } catch {}
+      return;
+    }
+
+    // ===== ROOMED FLOW (legacy / current) =====
     if (t === 'join' && typeof msg.room === 'string') {
       const nextRoom = msg.room.trim();
       const prevRoom = ws.roomId;
     
-      // If switching rooms, leave the previous one cleanly
+														   
       if (prevRoom && prevRoom !== nextRoom && rooms.has(prevRoom)) {
         const prevSet = rooms.get(prevRoom);
         prevSet.delete(ws);
@@ -129,20 +169,21 @@ wss.on('connection', (ws, req) => {
       getRoomSet(nextRoom).add(ws);
       console.log(`[JOIN] id=${ws.id} role=${ws.role} room=${nextRoom} peers=${rooms.get(nextRoom).size}`);
     
-      // Tell others in the new room, and send the roster once to the joiner
+																			
       broadcast(nextRoom, { type: 'peer-joined', id: ws.id, role: ws.role }, ws);
       const r = roster(nextRoom);
-      broadcast(nextRoom, { type: 'roster', peers: r }, ws);   // exclude joiner to avoid duplicate
+      broadcast(nextRoom, { type: 'roster', peers: r }, ws);
       ws.send(JSON.stringify({ type: 'roster', peers: r }));
       return;
     }
 
+    // If a message requires a room and we're not in one, drop it
     if (!ws.roomId) {
-      console.log(`[DROP] id=${ws.id} type=${t} (no room yet)`);
+      console.log(`[DROP] id=${ws.id} type=${t} (no room; not a roomless op)`);
       return;
     }
 
-    // forward messages; add "from"
+    // forward messages; add "from" within a room
     if (['offer','answer','candidate','bye','need-offer','keepalive'].includes(t)) {
       const payload = { ...msg, from: ws.id };
       let sent = 0;
@@ -154,6 +195,11 @@ wss.on('connection', (ws, req) => {
   });
 
   ws.on('close', () => {
+    // clean up fingerprint mapping
+    if (ws.fingerprint && fpClients.get(ws.fingerprint) === ws) {
+      fpClients.delete(ws.fingerprint);
+    }
+
     const { roomId } = ws;
     if (roomId && rooms.has(roomId)) {
       const set = rooms.get(roomId);
