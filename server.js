@@ -5,9 +5,9 @@
 // Forwards (roomless): register(fp, instance), relay({to:fp,...}), pair-init/pair-ack/pair-done
 
 import express from 'express';
-import { WebSocketServer } from 'ws';
 import { randomUUID } from 'crypto';
 import cors from 'cors';
+import { WebSocketServer, WebSocket } from 'ws';
 
 const PORT    = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
@@ -64,7 +64,7 @@ function deliverFp(toFp, obj, { toInstance = null, skipInstance = null } = {}) {
     for (const [inst, socket] of cmap) {
       if (toInstance && inst !== toInstance) continue;
       if (skipInstance && inst === skipInstance) continue;
-      if (socket.readyState === socket.OPEN) {
+      if (socket.readyState === WebSocket.OPEN) {
         socket.send(JSON.stringify(obj));
 		console.log(
 	  	  `[RELAY][fp] toFp=${toFp} inst=${inst} skip=${skipInstance || '-'} ` +
@@ -117,7 +117,7 @@ function broadcast(roomId, obj, exclude) {
   if (!set) return 0;
   let sent = 0;
   for (const s of set) {
-    if (s !== exclude && s.readyState === s.OPEN) { s.send(raw); sent++; }
+    if (s !== exclude && s.readyState === WebSocket.OPEN) { s.send(raw); sent++; }
   }
   console.log(`[RELAY][broadcast] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} sent=${sent}`);
   return sent;
@@ -126,7 +126,7 @@ function sendTo(roomId, peerId, obj) {
   const set = rooms.get(roomId);
   if (!set) return false;
   for (const s of set) {
-    if (s.id === peerId && s.readyState === s.OPEN) {
+    if (s.id === peerId && s.readyState === WebSocket.OPEN) {
       s.send(JSON.stringify(obj));
       console.log(`[RELAY][direct] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} to=${peerId}`);
       return true;
@@ -176,7 +176,7 @@ wss.on('connection', (ws, req) => {
         for (const mm of broadcastQ)  { try { ws.send(JSON.stringify(mm)); } catch {} }
         // Clear the queues we just consumed to prevent unbounded growth
         mbox.delete(ws.instanceId);
-        mbox.delete('__broadcast__');
+        //mbox.delete('__broadcast__');
         if (mbox.size === 0) mailbox.delete(ws.fingerprint);
       }
 
