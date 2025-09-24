@@ -66,6 +66,10 @@ function deliverFp(toFp, obj, { toInstance = null, skipInstance = null } = {}) {
       if (skipInstance && inst === skipInstance) continue;
       if (socket.readyState === socket.OPEN) {
         socket.send(JSON.stringify(obj));
+		console.log(
+	  	  `[RELAY][fp] toFp=${toFp} inst=${inst} skip=${skipInstance || '-'} ` +
+          `kind=${obj.kind || obj.type || obj.op || 'n/a'}`
+        );
         delivered = true;
       }
     }
@@ -77,8 +81,11 @@ function deliverFp(toFp, obj, { toInstance = null, skipInstance = null } = {}) {
     const q = box.get(key) || [];
     q.push(obj);
     box.set(key, q);
+	// (Optional) simple cap to avoid unbounded queues:
+    if (q.length > 500) {
+      q.splice(0, q.length - 500);
+    }
   }
-
   return delivered;
 }
 
@@ -164,11 +171,12 @@ wss.on('connection', (ws, req) => {
       if (mbox) {
         const targeted = mbox.get(ws.instanceId) || [];
         const broadcastQ = mbox.get('__broadcast__') || [];
+        // Send pending messages to THIS instance (targeted + broadcast)
+        for (const mm of targeted)    { try { ws.send(JSON.stringify(mm)); } catch {} }
+        for (const mm of broadcastQ)  { try { ws.send(JSON.stringify(mm)); } catch {} }
+        // Clear the queues we just consumed to prevent unbounded growth
         mbox.delete(ws.instanceId);
-        // NOTE: we do not clear '__broadcast__' here; other instances may still need it.
-        for (const mm of [...targeted, ...broadcastQ]) {
-          try { ws.send(JSON.stringify(mm)); } catch {}
-        }
+        mbox.delete('__broadcast__');
         if (mbox.size === 0) mailbox.delete(ws.fingerprint);
       }
 
