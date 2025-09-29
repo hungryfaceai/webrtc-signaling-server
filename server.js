@@ -5,7 +5,7 @@
 // Forwards (roomless): register(fp), relay({to:fp,...}), pair-init/pair-ack
 
 import express from 'express';
-import { WebSocketServer } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
 import cors from 'cors';
 
@@ -35,12 +35,13 @@ const mailbox   = new Map();      // fingerprint -> [pending messages]
 
 function deliverFp(toFp, obj) {
   const ws = fpClients.get(toFp);
-  if (ws && ws.readyState === ws.OPEN) {
+  if (ws && ws.readyState === WebSocket.OPEN) {
     ws.send(JSON.stringify(obj));
     return true;
   }
   const q = mailbox.get(toFp) || [];
   q.push(obj);
+  if (q.length > 500) q.splice(0, q.length - 500); // cap to last 500 messages //https://chatgpt.com/c/68da8bfd-c730-8330-9cab-b578127334e7
   mailbox.set(toFp, q);
   return false;
 }
@@ -73,7 +74,7 @@ function broadcast(roomId, obj, exclude) {
   if (!set) return 0;
   let sent = 0;
   for (const s of set) {
-    if (s !== exclude && s.readyState === s.OPEN) { s.send(raw); sent++; }
+    if (s !== exclude && s.readyState === WebSocket.OPEN) { s.send(raw); sent++; }
   }
   console.log(`[RELAY][broadcast] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} sent=${sent}`);
   return sent;
@@ -82,7 +83,7 @@ function sendTo(roomId, peerId, obj) {
   const set = rooms.get(roomId);
   if (!set) return false;
   for (const s of set) {
-    if (s.id === peerId && s.readyState === s.OPEN) { 
+    if (s.id === peerId && s.readyState === WebSocket.OPEN) { 
       s.send(JSON.stringify(obj)); 
       console.log(`[RELAY][direct] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} to=${peerId}`);
       return true; 
