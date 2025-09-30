@@ -5,7 +5,7 @@
 // Forwards (roomless): register(fp), relay({to:fp,...}), pair-init/pair-ack
 
 import express from 'express';
-import { WebSocketServer, WebSocket } from 'ws';
+import { WebSocketServer } from 'ws';
 import { randomUUID } from 'crypto';
 import cors from 'cors';
 
@@ -35,13 +35,12 @@ const mailbox   = new Map();      // fingerprint -> [pending messages]
 
 function deliverFp(toFp, obj) {
   const ws = fpClients.get(toFp);
-  if (ws && ws.readyState === WebSocket.OPEN) {
+  if (ws && ws.readyState === ws.OPEN) {
     ws.send(JSON.stringify(obj));
     return true;
   }
   const q = mailbox.get(toFp) || [];
   q.push(obj);
-  if (q.length > 500) q.splice(0, q.length - 500); // cap to last 500 messages //https://chatgpt.com/c/68da8bfd-c730-8330-9cab-b578127334e7
   mailbox.set(toFp, q);
   return false;
 }
@@ -74,7 +73,7 @@ function broadcast(roomId, obj, exclude) {
   if (!set) return 0;
   let sent = 0;
   for (const s of set) {
-    if (s !== exclude && s.readyState === WebSocket.OPEN) { s.send(raw); sent++; }
+    if (s !== exclude && s.readyState === s.OPEN) { s.send(raw); sent++; }
   }
   console.log(`[RELAY][broadcast] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} sent=${sent}`);
   return sent;
@@ -83,7 +82,7 @@ function sendTo(roomId, peerId, obj) {
   const set = rooms.get(roomId);
   if (!set) return false;
   for (const s of set) {
-    if (s.id === peerId && s.readyState === WebSocket.OPEN) { 
+    if (s.id === peerId && s.readyState === s.OPEN) { 
       s.send(JSON.stringify(obj)); 
       console.log(`[RELAY][direct] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} to=${peerId}`);
       return true; 
@@ -185,33 +184,8 @@ wss.on('connection', (ws, req) => {
       return;
     }
 
-    // --- Envelope passthrough for custom app traffic (RoomAuth, etc.)
-    if (t === 'app') {
-      // Expecting: { type:'app', to: <peerId?>, data: <object> }
-      const payload = {
-        type: 'app',
-        from: ws.id,
-        to:   msg.to,
-        data: msg.data
-      };
-
-      let sent = 0;
-      if (msg.to) {
-        sent = sendTo(ws.roomId, msg.to, payload) ? 1 : 0;
-      } else {
-        sent = broadcast(ws.roomId, payload, ws);
-      }
-
-      console.log(
-        `[RELAY] room=${ws.roomId} type=app (inner=${msg?.data?.type || 'n/a'}) ` +
-        `from=${ws.id} to=${msg.to || 'room'} sent=${sent}`
-      );
-      return;
-    }
-
     // forward messages; add "from" within a room
-    //if (['offer','answer','candidate','bye','need-offer','keepalive'].includes(t)) {
-    if (['offer','answer','candidate','bye','need-offer','keepalive', 'auth-hello','auth-reply'].includes(t)) {  //https://chatgpt.com/c/68da8bfd-c730-8330-9cab-b578127334e7
+    if (['offer','answer','candidate','bye','need-offer','keepalive'].includes(t)) {
       const payload = { ...msg, from: ws.id };
       let sent = 0;
       if (msg.to) sent = sendTo(ws.roomId, msg.to, payload) ? 1 : 0;
