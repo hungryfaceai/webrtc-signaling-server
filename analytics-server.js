@@ -161,35 +161,161 @@ export function mountAnalytics(app, opts = {}) {
     }
   });
 
-  // ---- Minimal HTML dashboard ----
+  // ---- Rich metrics (cards + tables) ----
+  app.get(`${base}/metrics.json`, async (_req, res) => {
+    await ready;
+    try {
+      const [{ n_live }] = (await pool.query(
+        `SELECT COUNT(DISTINCT installId) AS n_live
+           FROM events
+          WHERE ts >= NOW() - INTERVAL '2 minutes'`
+      )).rows;
+  
+      const topFeatures7d = (await pool.query(
+        `SELECT feature, COUNT(DISTINCT installId) AS uniques
+           FROM events
+          WHERE ts >= NOW() - INTERVAL '7 days'
+          GROUP BY feature
+          ORDER BY uniques DESC
+          LIMIT 10`
+      )).rows;
+  
+      const topEvents7d = (await pool.query(
+        `SELECT ev, COUNT(*) AS n
+           FROM events
+          WHERE kind = 'ev'
+            AND ts >= NOW() - INTERVAL '7 days'
+          GROUP BY ev
+          ORDER BY n DESC
+          LIMIT 10`
+      )).rows;
+  
+      const pairing7d = (await pool.query(
+        `WITH base AS (
+           SELECT installId, sessionId, ev
+             FROM events
+            WHERE kind='ev'
+              AND ts >= NOW() - INTERVAL '7 days'
+              AND ev IN ('pair-init','pair-ack','pair-done')
+            GROUP BY installId, sessionId, ev
+         )
+         SELECT
+           (SELECT COUNT(*) FROM (SELECT DISTINCT installId, sessionId FROM base WHERE ev='pair-init') x) AS init,
+           (SELECT COUNT(*) FROM (SELECT DISTINCT installId, sessionId FROM base WHERE ev='pair-ack') x) AS ack,
+           (SELECT COUNT(*) FROM (SELECT DISTINCT installId, sessionId FROM base WHERE ev='pair-done') x) AS done`
+      )).rows[0] || { init: 0, ack: 0, done: 0 };
+  
+      const errors7d = (await pool.query(
+        `SELECT ev, COUNT(*) AS n
+           FROM events
+          WHERE kind='ev'
+            AND ts >= NOW() - INTERVAL '7 days'
+            AND (ev ILIKE 'error_%' OR ev ILIKE '%_failed' OR ev ILIKE '%_timeout')
+          GROUP BY ev
+          ORDER BY n DESC
+          LIMIT 10`
+      )).rows;
+  
+      const daily30 = (await pool.query(
+        `SELECT to_char(date_trunc('day', ts AT TIME ZONE 'Europe/London'), 'YYYY-MM-DD') AS day,
+                COUNT(DISTINCT installId) AS uniques
+           FROM events
+          WHERE ts >= NOW() - INTERVAL '30 days'
+          GROUP BY 1
+          ORDER BY 1 DESC`
+      )).rows;
+  
+      res.json({
+        live: Number(n_live) || 0,
+        topFeatures7d,
+        topEvents7d,
+        pairing7d,
+        errors7d,
+        daily30
+      });
+    } catch (e) {
+      console.error('[analytics] metrics failed:', e);
+      res.status(500).json({ error: 'metrics_failed', message: e.message });
+    }
+  });
+
+  // ---- Minimal HTML dashboard (now shows rich metrics) ----
   app.get(`${base}`, (_req, res) => {
     res.type('html').send(`<!doctype html>
-<meta charset="utf-8">
-<title>Analytics</title>
-<style>body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;color:#eee;background:#000}
-h1{margin:0 0 12px} table{border-collapse:collapse} td,th{padding:6px 10px;border-bottom:1px solid #222}</style>
-<h1>Naptio Analytics</h1>
-<p><em>Anonymous uniques + active session time</em></p>
-<div id="cards">Loading…</div>
-<table id="daily"></table>
-<script type="module">
-  const BASE = ${JSON.stringify((typeof base !== 'undefined' ? base : '/a'))}; // server var
-  async function run(){
-    try {
-      const r = await fetch('${base}/summary.json?days=30');
-      if (!r.ok) throw new Error('HTTP '+r.status);
-      const data = await r.json();
-      document.getElementById('cards').innerHTML =
-        '<p>DAU: <b>'+data.dau+'</b> | WAU: <b>'+data.wau+
-        '</b> | MAU: <b>'+data.mau+'</b> | Avg session: <b>'+data.avgSessionSeconds+'s</b></p>';
-      const rows = (data.daily||[]).map(d => '<tr><td>'+d.day+'</td><td>'+d.uniques+'</td></tr>').join('');
-      document.getElementById('daily').innerHTML = '<tr><th>Day</th><th>Uniques</th></tr>'+rows;
-    } catch (err) {
-      document.getElementById('cards').textContent = 'Error: ' + err.message;
+  <meta charset="utf-8">
+  <title>Analytics</title>
+  <style>
+    :root { color-scheme: dark; }
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;color:#eee;background:#000;line-height:1.4}
+    h1{margin:0 0 12px}
+    h2{margin:18px 0 8px;font-size:16px}
+    .cards p{margin:0 0 10px}
+    table{border-collapse:collapse;margin:8px 0 16px;width:100%;max-width:800px}
+    td,th{padding:6px 10px;border-bottom:1px solid #222;text-align:left}
+    th{opacity:.8;font-weight:600}
+    .muted{opacity:.7}
+  </style>
+  <h1>Naptio Analytics</h1>
+  <p class="muted"><em>Anonymous uniques + active session time</em></p>
+  
+  <div class="cards" id="cards">Loading…</div>
+  
+  <h2>Top features (7d)</h2>
+  <div id="topFeatures"></div>
+  
+  <h2>Top events (7d)</h2>
+  <div id="topEvents"></div>
+  
+  <h2>Pairing funnel (7d)</h2>
+  <div id="pairing"></div>
+  
+  <h2>Errors (7d)</h2>
+  <div id="errors"></div>
+  
+  <h2>Daily uniques (30d)</h2>
+  <div id="daily"></div>
+  
+  <script type="module">
+    async function run(){
+      try {
+        const r = await fetch('${base}/metrics.json');
+        if (!r.ok) throw new Error('HTTP '+r.status);
+        const m = await r.json();
+  
+        // KPI cards
+        document.getElementById('cards').innerHTML =
+          '<p>Live (2m): <b>'+m.live+
+          '</b> | Top feature: <b>'+(m.topFeatures7d?.[0]?.feature ?? '—')+'</b> ('+(m.topFeatures7d?.[0]?.uniques ?? 0)+' uniques)</p>';
+  
+        // helpers
+        const table = (rows, headers) => {
+          const head = '<tr>' + headers.map(h=>'<th>'+h+'</th>').join('') + '</tr>';
+          const body = (rows||[]).map(r => '<tr>' + headers.map(h => {
+            const k = h; const v = r[k] ?? r[k.toLowerCase()];
+            return '<td>'+ (v ?? '') + '</td>';
+          }).join('') + '</tr>').join('');
+          return '<table>'+head+body+'</table>';
+        };
+        const pct = (a,b) => { a=+a||0; b=+b||0; return b? Math.round(a*1000/b)/10+'%':'—'; };
+  
+        // sections
+        document.getElementById('topFeatures').innerHTML = table(m.topFeatures7d, ['feature','uniques']);
+        document.getElementById('topEvents').innerHTML   = table(m.topEvents7d,   ['ev','n']);
+        document.getElementById('errors').innerHTML      = table(m.errors7d,      ['ev','n']);
+  
+        const pf = m.pairing7d || {init:0,ack:0,done:0};
+        document.getElementById('pairing').innerHTML =
+          '<table><tr><th>init</th><th>ack</th><th>done</th><th>ack/init</th><th>done/init</th></tr>'+
+          '<tr><td>'+pf.init+'</td><td>'+pf.ack+'</td><td>'+pf.done+'</td>'+
+          '<td>'+pct(pf.ack,pf.init)+'</td><td>'+pct(pf.done,pf.init)+'</td></tr></table>';
+  
+        document.getElementById('daily').innerHTML = table(m.daily30, ['day','uniques']);
+      } catch (err) {
+        document.getElementById('cards').textContent = 'Error: ' + err.message;
+      }
     }
-  }
-  run();
-</script>`);
+    run();
+  </script>`);
   });
 
   // ---- Prune: clear ip_full after keepFullDays, drop very old rows after keepAllDays ----
@@ -252,6 +378,9 @@ async function ensureSchema(pool) {
     CREATE INDEX IF NOT EXISTS events_session_idx  ON events(sessionId);
     CREATE INDEX IF NOT EXISTS events_iphash_idx   ON events(ip_hash);
     CREATE INDEX IF NOT EXISTS events_iptrunc_idx  ON events(ip_trunc);
+    CREATE INDEX IF NOT EXISTS events_feature_idx  ON events(feature);
+    CREATE INDEX IF NOT EXISTS events_kind_ev_idx  ON events(ev) WHERE kind='ev';
+
   `);
 }
 
