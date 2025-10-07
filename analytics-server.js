@@ -33,6 +33,26 @@ export function mountAnalytics(app, opts = {}) {
     });
   }
 
+  // Simple admin gate: either ?key=... OR Basic Auth using env vars
+  function requireAdmin(req, res, next) {
+    const qk = process.env.ANALYTICS_ADMIN_KEY;
+    if (qk && req.query.key === qk) return next();
+  
+    const u = process.env.ADMIN_USER;
+    const p = process.env.ADMIN_PASS;
+    if (u && p) {
+      const hdr = req.headers.authorization || '';
+      if (hdr.startsWith('Basic ')) {
+        const [user, pass] = Buffer.from(hdr.slice(6), 'base64').toString().split(':');
+        if (user === u && pass === p) return next();
+      }
+      res.set('WWW-Authenticate', 'Basic realm="Analytics Admin"');
+      return res.status(401).send('Unauthorized');
+    }
+    // If no secrets configured, block by default
+    return res.status(401).send('Admin access not configured');
+  }
+
   // ---- Postgres pool ----
   const connectionString =
     process.env.DATABASE_URL ||
@@ -315,6 +335,204 @@ export function mountAnalytics(app, opts = {}) {
       }
     }
     run();
+  </script>`);
+  });
+
+  // Recent events with IPs (admin)
+  app.get(`${base}/admin/recent.json`, requireAdmin, async (req, res) => {
+    await ready;
+    try {
+      const days  = Math.min(180, Math.max(1, +(req.query.days || 7)));
+      const limit = Math.min(2000, Math.max(1, +(req.query.limit || 200)));
+      const feature = (req.query.feature || '').toString().trim();
+      const allowFull = req.query.full === '1'; // show ip_full only if admin requests it
+  
+      const params = [days, limit];
+      const where  = [`ts >= NOW() - ($1 || ' days')::interval`];
+      if (feature) { where.push(`feature = $3`); params.push(feature); }
+  
+      const sql = `
+        SELECT ts, app, feature, page, installId, sessionId, activeMs, kind, ev,
+               ip_full, ip_trunc, ip_hash, ua
+          FROM events
+         WHERE ${where.join(' AND ')}
+         ORDER BY ts DESC
+         LIMIT $2
+      `;
+      const rows = (await pool.query(sql, params)).rows;
+  
+      // Only include ip_full if explicitly requested (and you may still redact)
+      if (!allowFull) {
+        for (const r of rows) r.ip_full = null;
+      }
+      res.json({ days, limit, feature: feature || null, rows });
+    } catch (e) {
+      console.error('[analytics] admin recent failed:', e);
+      res.status(500).json({ error: 'admin_recent_failed', message: e.message });
+    }
+  });
+
+  // Per-install aggregates (admin)
+  app.get(`${base}/admin/installs.json`, requireAdmin, async (req, res) => {
+    await ready;
+    try {
+      const days  = Math.min(180, Math.max(1, +(req.query.days || 30)));
+      const limit = Math.min(1000, Math.max(1, +(req.query.limit || 200)));
+      const feature = (req.query.feature || '').toString().trim();
+  
+      const params = [days, limit];
+      const where  = [`ts >= NOW() - ($1 || ' days')::interval`];
+      if (feature) { where.push(`feature = $3`); params.push(feature); }
+  
+      const sql = `
+        WITH sess AS (
+          SELECT installId, sessionId,
+                 MIN(ts) AS first_ts,
+                 MAX(ts) AS last_ts,
+                 MAX(activeMs) AS active_ms
+            FROM events
+           WHERE ${where.join(' AND ')}
+           GROUP BY installId, sessionId
+        ),
+        feat AS (
+          SELECT installId, COUNT(DISTINCT feature) AS features
+            FROM events
+           WHERE ${where.join(' AND ')}
+           GROUP BY installId
+        )
+        SELECT s.installId,
+               MIN(s.first_ts)  AS first_seen,
+               MAX(s.last_ts)   AS last_seen,
+               COUNT(*)         AS sessions,
+               COALESCE(SUM(s.active_ms),0) AS active_ms,
+               COALESCE(f.features,0)       AS features
+          FROM sess s
+          LEFT JOIN feat f ON f.installId = s.installId
+         GROUP BY s.installId, f.features
+         ORDER BY last_seen DESC
+         LIMIT $2
+      `;
+      const rows = (await pool.query(sql, params)).rows;
+      res.json({ days, limit, feature: feature || null, rows });
+    } catch (e) {
+      console.error('[analytics] admin installs failed:', e);
+      res.status(500).json({ error: 'admin_installs_failed', message: e.message });
+    }
+  });
+
+  // Admin UI (IP view + install aggregates)
+  app.get(`${base}/admin`, requireAdmin, (_req, res) => {
+    res.type('html').send(`<!doctype html>
+  <meta charset="utf-8">
+  <title>Analytics Admin</title>
+  <style>
+    :root { color-scheme: dark }
+    body{font-family:system-ui,Segoe UI,Roboto,Arial;margin:24px;background:#000;color:#eee}
+    h1{margin:0 0 12px} h2{margin:18px 0 8px;font-size:16px}
+    label{margin-right:10px}
+    table{border-collapse:collapse;margin:8px 0 16px;width:100%;max-width:1200px}
+    td,th{padding:6px 10px;border-bottom:1px solid #222;text-align:left}
+    th{opacity:.8}
+    input,select{background:#111;border:1px solid #333;color:#eee;padding:6px 8px;border-radius:6px}
+    .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
+  </style>
+  
+  <h1>Analytics Admin</h1>
+  <div class="controls">
+    <label>Days <input id="days" type="number" min="1" max="180" value="7"></label>
+    <label>Limit <input id="limit" type="number" min="1" max="2000" value="200"></label>
+    <label>Feature <input id="feature" placeholder="(any)"></label>
+    <label><input id="full" type="checkbox"> Show full IPs</label>
+    <button id="load">Load</button>
+  </div>
+  
+  <h2>Recent events</h2>
+  <div id="recent"></div>
+  
+  <h2>Installs (aggregates)</h2>
+  <div id="installs"></div>
+  
+  <script type="module">
+    const qs = new URLSearchParams(location.search);
+    const key = qs.get('key'); // pass ?key=... if you use ANALYTICS_ADMIN_KEY
+  
+    const $ = s => document.querySelector(s);
+    $('#load').addEventListener('click', run);
+    run();
+  
+    function table(rows, headers){
+      const head = '<tr>'+headers.map(h=>'<th>'+h+'</th>').join('')+'</tr>';
+      const body = (rows||[]).map(r => '<tr>'+headers.map(h=>{
+        const k = h.toLowerCase().replace(/\\s+/g,'_');
+        return '<td>'+ (r[h] ?? r[k] ?? '') + '</td>';
+      }).join('') + '</tr>').join('');
+      return '<table>'+head+body+'</table>';
+    }
+  
+    function maskIp(ip){
+      if(!ip) return '';
+      if(/:\\d+$/.test(ip)) ip = ip.replace(/:\\d+$/,''); // strip port
+      if(ip.includes('.')){
+        const p = ip.split('.'); p[3] = '*'; return p.join('.');
+      }
+      if(ip.includes(':')){
+        const p = ip.split(':'); return p.slice(0,4).join(':') + ':*:*:*:*';
+      }
+      return ip;
+    }
+  
+    async function run(){
+      const days = +$('#days').value||7;
+      const limit = +$('#limit').value||200;
+      const feature = $('#feature').value.trim();
+      const full = $('#full').checked ? '1' : '0';
+      const base = '${base}';
+  
+      const q = p => Object.entries(p).filter(([,v])=>v!=null && v!=='')
+                    .map(([k,v])=>k+'='+encodeURIComponent(v)).join('&');
+  
+      const urlRecent   = base + '/admin/recent.json?' + q({ days, limit, feature, full, key });
+      const urlInstalls = base + '/admin/installs.json?' + q({ days: Math.min(days,30), limit: 500, feature, key });
+  
+      try{
+        const [r1, r2] = await Promise.all([fetch(urlRecent), fetch(urlInstalls)]);
+        if(!r1.ok) throw new Error('recent: HTTP '+r1.status);
+        if(!r2.ok) throw new Error('installs: HTTP '+r2.status);
+        const recent   = await r1.json();
+        const installs = await r2.json();
+  
+        const rows = (recent.rows||[]).map(r => ({
+          ts: new Date(r.ts).toISOString().replace('T',' ').slice(0,19),
+          app: r.app, feature: r.feature, page: r.page,
+          installId: r.installid, sessionId: r.sessionid,
+          activeMs: r.activems, kind: r.kind, ev: r.ev,
+          ip_full: $('#full').checked ? (r.ip_full || '') : maskIp(r.ip_full) || r.ip_trunc,
+          ip_trunc: r.ip_trunc, ip_hash: r.ip_hash,
+          ua: r.ua
+        }));
+  
+        $('#recent').innerHTML = table(rows, [
+          'ts','app','feature','page',
+          'installId','sessionId','activeMs','kind','ev',
+          'ip_full','ip_trunc','ip_hash','ua'
+        ]);
+  
+        const rows2 = (installs.rows||[]).map(r => ({
+          installId: r.installid,
+          first_seen: new Date(r.first_seen).toISOString().slice(0,19).replace('T',' '),
+          last_seen:  new Date(r.last_seen).toISOString().slice(0,19).replace('T',' '),
+          sessions: r.sessions,
+          active_ms: r.active_ms,
+          features: r.features
+        }));
+        $('#installs').innerHTML = table(rows2, [
+          'installId','first_seen','last_seen','sessions','active_ms','features'
+        ]);
+      }catch(e){
+        $('#recent').textContent = 'Error: ' + e.message;
+        $('#installs').textContent = '';
+      }
+    }
   </script>`);
   });
 
