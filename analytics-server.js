@@ -298,21 +298,4 @@ function hashIp(ip, salt) {
   return crypto.createHash('sha256').update(`${salt}|${ip}`).digest('base64url');
 }
 
-//Add a temporary “peek” endpoint (quick dev view) https://chatgpt.com/c/68e533da-6308-832a-8a08-866674a746ac
-const ANALYTICS_DEBUG_SECRET="naptioanalytics";
-app.get(`${base}/debug/recent`, async (req, res) => {
-  try {
-    if (process.env.ANALYTICS_DEBUG_SECRET &&
-        req.query.key !== process.env.ANALYTICS_DEBUG_SECRET) return res.sendStatus(401);
-
-    await ready;
-    const r = await pool.query(`
-      SELECT id, ts, app, feature, page, installid, sessionid, activems, kind, ev
-      FROM events ORDER BY ts DESC LIMIT 50
-    `);
-    res.json(r.rows);
-  } catch (e) {
-    res.status(500).json({ error: e.message });
-  }
-});
 
