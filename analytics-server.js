@@ -299,7 +299,7 @@ function hashIp(ip, salt) {
 }
 
 //Add a temporary “peek” endpoint (quick dev view) https://chatgpt.com/c/68e533da-6308-832a-8a08-866674a746ac
-ANALYTICS_DEBUG_SECRET=naptioanalytics
+ANALYTICS_DEBUG_SECRET="naptioanalytics"
 app.get(`${base}/debug/recent`, async (req, res) => {
   try {
     if (process.env.ANALYTICS_DEBUG_SECRET &&
