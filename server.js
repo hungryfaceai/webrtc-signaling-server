@@ -16,6 +16,7 @@ const WS_PATH = process.env.WS_PATH || '/ws';
 const app = express();
 
 const ALLOWED_ORIGINS = ['https://hungryfaceai.github.io', 'http://localhost:3000'];
+app.set('trust proxy', true);
 app.use(cors({
   origin: (origin, cb) => cb(null, !origin || ALLOWED_ORIGINS.includes(origin)),
   // allow POST for /a/evt analytics ingest (safe to allow globally)
@@ -36,10 +37,9 @@ app.get('/health', (_req, res) => res.send('ok'));
 //   POST /a/prune        (retention)
 mountAnalytics(app, {
   base: '/a',
-  dbPath: process.env.ANALYTICS_DB || 'analytics.db',
   ipSalt: process.env.ANALYTICS_IP_SALT,           // set this in env
-  keepFullDays: 7,                                 // exact IP retention
-  keepAllDays: 180,                                // row retention
+  keepFullDays: 30,                                 // exact IP retention - should change to 7 (GDPR)
+  keepAllDays: 365,                                // row retention - should change to 180
   // allow your front-end origin(s) to call /a/* if cross-origin (e.g. GitHub Pages)
   allowedOrigins: ['https://hungryfaceai.github.io', 'http://localhost:3000']
 });
