@@ -27,11 +27,13 @@ export function mountAnalytics(app, opts = {}) {
       const o = (req.headers.origin || '').toLowerCase();
       if (allowed.includes(o)) res.setHeader('Access-Control-Allow-Origin', o);
       res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Headers', 'content-type, accept');
+      res.setHeader('Access-Control-Allow-Headers', 'content-type, accept, authorization');
       if (req.method === 'OPTIONS') return res.sendStatus(200);
       next();
     });
   }
+
+  app.use(base, (_req, res, next) => { res.set('Cache-Control','no-store'); next(); });
 
   // Simple admin gate: either ?key=... OR Basic Auth using env vars
   function requireAdmin(req, res, next) {
@@ -338,6 +340,8 @@ export function mountAnalytics(app, opts = {}) {
   </script>`);
   });
 
+  app.get(`${base}/`, (_req, res) => res.redirect(base));
+
   // Recent events with IPs (admin)
   app.get(`${base}/admin/recent.json`, requireAdmin, async (req, res) => {
     await ready;
@@ -537,7 +541,7 @@ export function mountAnalytics(app, opts = {}) {
   });
 
   // ---- Prune: clear ip_full after keepFullDays, drop very old rows after keepAllDays ----
-  app.post(`${base}/prune`, async (_req, res) => {
+  app.post(`${base}/prune`, requireAdmin, async (_req, res) => {
     await ready;
     try {
       const cleared = await pool.query(
