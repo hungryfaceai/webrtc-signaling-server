@@ -38,8 +38,8 @@ app.get('/health', (_req, res) => res.send('ok'));
 mountAnalytics(app, {
   base: '/a',
   ipSalt: process.env.ANALYTICS_IP_SALT,           // set this in env
-  keepFullDays: 30,                                 // exact IP retention - should change to 7 (GDPR)
-  keepAllDays: 365,                                // row retention - should change to 180
+  keepFullDays: 3650,                                 // exact IP retention - should change to 7 (GDPR)
+  keepAllDays: 3650,                                // row retention - should change to 180
   // allow your front-end origin(s) to call /a/* if cross-origin (e.g. GitHub Pages)
   allowedOrigins: ['https://hungryfaceai.github.io', 'http://localhost:3000']
 });
