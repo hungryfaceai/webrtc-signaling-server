@@ -8,7 +8,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import { randomUUID } from 'crypto';
 import cors from 'cors';
-import { mountAnalytics } from 'analytics-server.js'; //https://chatgpt.com/c/68e3afbe-a900-8331-9fd1-d728cdd8a2aa
+import { mountAnalytics } from './analytics-server.js'; //https://chatgpt.com/c/68e3afbe-a900-8331-9fd1-d728cdd8a2aa
 
 const PORT    = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
