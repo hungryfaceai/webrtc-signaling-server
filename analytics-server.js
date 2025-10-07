@@ -82,54 +82,62 @@ export function mountAnalytics(app, opts = {}) {
 
   // ---- Ingest endpoint ----
   app.post(`${base}/evt`, express.json(), async (req, res) => {
-    await ready;
-    const b = req.body || {};
-    if (!b.installId || !b.sessionId) return res.sendStatus(400);
-
-    const ip = getClientIp(req);
-
-    const row = {
-      ts:   new Date(+b.ts || Date.now()),
-      app:  b.app || 'app',
-      feature: b.feature || '',
-      page: b.page || '',
-      installId: String(b.installId).slice(0,128),
-      sessionId: String(b.sessionId).slice(0,128),
-      activeMs: Math.max(0, +b.activeMs|0),
-      kind: b.t === 'ev' ? 'ev' : 'hb',
-      ev:   b.ev || null,
-      // keep TEXT for props to avoid driver/json casting edge cases
-      props: b.props ? safeJsonString(b.props, 2000) : null,
-      ip_full: ip || null,
-      ip_trunc: ip ? truncateIp(ip) : null,
-      ip_hash: ip ? hashIp(ip, ipSalt) : null,
-      ua: req.headers['user-agent']?.toString().slice(0,256) || null,
-    };
-
     try {
-      await pool.query(
-        `INSERT INTO events
-          (ts, app, feature, page, installId, sessionId, activeMs, kind, ev, props, ip_full, ip_trunc, ip_hash, ua)
-         VALUES
-          ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
-        [
-          row.ts, row.app, row.feature, row.page,
-          row.installId, row.sessionId, row.activeMs,
-          row.kind, row.ev, row.props,
-          row.ip_full, row.ip_trunc, row.ip_hash, row.ua
-        ]
-      );
-      res.sendStatus(204);
+      await ready;
+
+      const b = req.body || {};
+      if (!b.installId || !b.sessionId) return res.sendStatus(400);
+
+      const ip = getClientIp(req);
+
+      const row = {
+        ts:   new Date(+b.ts || Date.now()),
+        app:  b.app || 'app',
+        feature: b.feature || '',
+        page: b.page || '',
+        installId: String(b.installId).slice(0,128),
+        sessionId: String(b.sessionId).slice(0,128),
+        activeMs: Math.max(0, +b.activeMs|0),
+        kind: b.t === 'ev' ? 'ev' : 'hb',
+        ev:   b.ev || null,
+        // keep TEXT for props to avoid driver/json casting edge cases
+        props: b.props ? safeJsonString(b.props, 2000) : null,
+        ip_full: ip || null,
+        ip_trunc: ip ? truncateIp(ip) : null,
+        ip_hash: ip ? hashIp(ip, ipSalt) : null,
+        ua: req.headers['user-agent']?.toString().slice(0,256) || null,
+      };
+
+      // Insert should never break the client flow; log and return 204 on failure.
+      try {
+        await pool.query(
+          `INSERT INTO events
+           (ts, app, feature, page, installId, sessionId, activeMs, kind, ev, props, ip_full, ip_trunc, ip_hash, ua)
+           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
+          [
+            row.ts, row.app, row.feature, row.page,
+            row.installId, row.sessionId, row.activeMs,
+            row.kind, row.ev, row.props,
+            row.ip_full, row.ip_trunc, row.ip_hash, row.ua
+          ]
+        );
+      } catch (e) {
+        console.warn('[analytics] insert failed:', e);
+        return res.sendStatus(204);
+      }
+
+      return res.sendStatus(204);
     } catch (e) {
-      console.warn('[analytics] insert failed:', e);
-      res.sendStatus(204); // don't break clients
+      console.error('[analytics] /evt failed before insert:', e);
+      return res.status(500).end();
     }
   });
 
   // ---- Summary JSON ----
   app.get(`${base}/summary.json`, async (req, res) => {
-    await ready;
     try {
+      await ready;
+
       const days = Math.max(1, Math.min(180, +(req.query.days || 30)));
       const since = new Date(Date.now() - days*86400*1000);
 
@@ -169,7 +177,7 @@ export function mountAnalytics(app, opts = {}) {
         [since]
       )).rows;
 
-      res.json({
+      return res.json({
         days,
         dau: Number(dau) || 0,
         wau: Number(wau) || 0,
@@ -179,14 +187,15 @@ export function mountAnalytics(app, opts = {}) {
       });
     } catch (e) {
       console.error('[analytics] summary failed:', e);
-      res.status(500).json({ error: 'summary_failed', message: e.message });
+      return res.status(500).json({ error: 'summary_failed', message: e.message });
     }
   });
 
   // ---- Rich metrics (cards + tables) ----
   app.get(`${base}/metrics.json`, async (_req, res) => {
-    await ready;
     try {
+      await ready;
+
       const [{ n_live }] = (await pool.query(
         `SELECT COUNT(DISTINCT installId) AS n_live
            FROM events
@@ -247,7 +256,7 @@ export function mountAnalytics(app, opts = {}) {
           ORDER BY 1 DESC`
       )).rows;
   
-      res.json({
+      return res.json({
         live: Number(n_live) || 0,
         topFeatures7d,
         topEvents7d,
@@ -257,7 +266,7 @@ export function mountAnalytics(app, opts = {}) {
       });
     } catch (e) {
       console.error('[analytics] metrics failed:', e);
-      res.status(500).json({ error: 'metrics_failed', message: e.message });
+      return res.status(500).json({ error: 'metrics_failed', message: e.message });
     }
   });
 
@@ -344,8 +353,9 @@ export function mountAnalytics(app, opts = {}) {
 
   // Recent events with IPs (admin)
   app.get(`${base}/admin/recent.json`, requireAdmin, async (req, res) => {
-    await ready;
     try {
+      await ready;
+
       const days  = Math.min(180, Math.max(1, +(req.query.days || 7)));
       const limit = Math.min(2000, Math.max(1, +(req.query.limit || 200)));
       const feature = (req.query.feature || '').toString().trim();
@@ -369,17 +379,18 @@ export function mountAnalytics(app, opts = {}) {
       if (!allowFull) {
         for (const r of rows) r.ip_full = null;
       }
-      res.json({ days, limit, feature: feature || null, rows });
+      return res.json({ days, limit, feature: feature || null, rows });
     } catch (e) {
       console.error('[analytics] admin recent failed:', e);
-      res.status(500).json({ error: 'admin_recent_failed', message: e.message });
+      return res.status(500).json({ error: 'admin_recent_failed', message: e.message });
     }
   });
 
   // Per-install aggregates (admin)
   app.get(`${base}/admin/installs.json`, requireAdmin, async (req, res) => {
-    await ready;
     try {
+      await ready;
+
       const days  = Math.min(180, Math.max(1, +(req.query.days || 30)));
       const limit = Math.min(1000, Math.max(1, +(req.query.limit || 200)));
       const feature = (req.query.feature || '').toString().trim();
@@ -417,10 +428,10 @@ export function mountAnalytics(app, opts = {}) {
          LIMIT $2
       `;
       const rows = (await pool.query(sql, params)).rows;
-      res.json({ days, limit, feature: feature || null, rows });
+      return res.json({ days, limit, feature: feature || null, rows });
     } catch (e) {
       console.error('[analytics] admin installs failed:', e);
-      res.status(500).json({ error: 'admin_installs_failed', message: e.message });
+      return res.status(500).json({ error: 'admin_installs_failed', message: e.message });
     }
   });
 
@@ -542,8 +553,9 @@ export function mountAnalytics(app, opts = {}) {
 
   // ---- Prune: clear ip_full after keepFullDays, drop very old rows after keepAllDays ----
   app.post(`${base}/prune`, requireAdmin, async (_req, res) => {
-    await ready;
     try {
+      await ready;
+
       const cleared = await pool.query(
         `UPDATE events
             SET ip_full = NULL
@@ -556,10 +568,10 @@ export function mountAnalytics(app, opts = {}) {
           WHERE ts < NOW() - ($1 || ' days')::interval`,
         [String(keepAllDays)]
       );
-      res.json({ ip_full_cleared: cleared.rowCount, rows_deleted: deleted.rowCount, keepAllDays });
+      return res.json({ ip_full_cleared: cleared.rowCount, rows_deleted: deleted.rowCount, keepAllDays });
     } catch (e) {
       console.error('[analytics] prune failed:', e);
-      res.status(500).json({ error: 'prune_failed', message: e.message });
+      return res.status(500).json({ error: 'prune_failed', message: e.message });
     }
   });
 
@@ -568,9 +580,9 @@ export function mountAnalytics(app, opts = {}) {
     try {
       await ready;
       const r = await pool.query('SELECT 1 AS ok');
-      res.json({ ok: r.rows?.[0]?.ok === 1 });
+      return res.json({ ok: r.rows?.[0]?.ok === 1 });
     } catch (e) {
-      res.status(500).json({ ok: false, error: e.message });
+      return res.status(500).json({ ok: false, error: e.message });
     }
   });
 }
@@ -648,5 +660,3 @@ function expandIPv6(ip) {
 function hashIp(ip, salt) {
   return crypto.createHash('sha256').update(`${salt}|${ip}`).digest('base64url');
 }
-
-
