@@ -1,7 +1,8 @@
 // server/analytics-server.js
 // Lightweight analytics ingest + tiny dashboard (Postgres edition).
-// - Stores anonymous usage + active time + IP (full/truncated/hashed) + UA
+// - Anonymous usage + active time + IP (full/truncated/hashed) + UA
 // - Prunes exact IPs after a short retention window
+// - Adds /a/health and waits for schema readiness to avoid early 500s
 
 import express from 'express';
 import crypto from 'node:crypto';
@@ -13,8 +14,8 @@ const { Pool } = pg;
 export function mountAnalytics(app, opts = {}) {
   const base = opts.base ?? '/a';
   const ipSalt = opts.ipSalt ?? process.env.ANALYTICS_IP_SALT ?? 'rotate-me';
-  const keepFullDays = opts.keepFullDays ?? 7;   // keep exact IP this long
-  const keepAllDays  = opts.keepAllDays  ?? 180; // keep rows this long
+  const keepFullDays = opts.keepFullDays ?? 7;   // exact IP retention
+  const keepAllDays  = opts.keepAllDays  ?? 180; // row retention
 
   // If your server sits behind a proxy (Render/Cloudflare/NGINX):
   app.set('trust proxy', true);
@@ -33,23 +34,33 @@ export function mountAnalytics(app, opts = {}) {
   }
 
   // ---- Postgres pool ----
+  const connectionString =
+    process.env.DATABASE_URL ||
+    process.env.POSTGRES_URL ||
+    process.env.PG_CONNECTION_STRING;
+
+  if (!connectionString) {
+    console.error('[analytics] No DATABASE_URL/POSTGRES_URL set');
+  }
+
   const pool = new Pool({
-    connectionString:
-      process.env.DATABASE_URL ||
-      process.env.POSTGRES_URL ||
-      process.env.PG_CONNECTION_STRING,
+    connectionString,
     ssl: { rejectUnauthorized: false }, // Render PG requires SSL
     max: Number(process.env.PGPOOL_MAX || 10),
     idleTimeoutMillis: 30_000,
   });
 
-  // Create schema on boot (fire-and-forget)
-  ensureSchema(pool).catch(err =>
-    console.error('[analytics] failed to ensure schema:', err)
-  );
+  // Ensure schema and wait for it in routes
+  const ready = ensureSchema(pool).then(() => {
+    console.log('[analytics] schema ready');
+  }).catch(err => {
+    console.error('[analytics] failed to ensure schema:', err);
+    throw err;
+  });
 
   // ---- Ingest endpoint ----
   app.post(`${base}/evt`, express.json(), async (req, res) => {
+    await ready;
     const b = req.body || {};
     if (!b.ts || !b.installId || !b.sessionId) return res.sendStatus(400);
 
@@ -95,23 +106,24 @@ export function mountAnalytics(app, opts = {}) {
 
   // ---- Summary JSON ----
   app.get(`${base}/summary.json`, async (req, res) => {
+    await ready;
     try {
       const days = Math.max(1, Math.min(180, +(req.query.days || 30)));
       const since = new Date(Date.now() - days*86400*1000);
 
       const [{ n: dau }] = (await pool.query(
         `SELECT COUNT(DISTINCT installId) AS n
-         FROM events WHERE ts >= NOW() - INTERVAL '1 day'`
+           FROM events WHERE ts >= NOW() - INTERVAL '1 day'`
       )).rows;
 
       const [{ n: wau }] = (await pool.query(
         `SELECT COUNT(DISTINCT installId) AS n
-         FROM events WHERE ts >= NOW() - INTERVAL '7 days'`
+           FROM events WHERE ts >= NOW() - INTERVAL '7 days'`
       )).rows;
 
       const [{ n: mau }] = (await pool.query(
         `SELECT COUNT(DISTINCT installId) AS n
-         FROM events WHERE ts >= NOW() - INTERVAL '30 days'`
+           FROM events WHERE ts >= NOW() - INTERVAL '30 days'`
       )).rows;
 
       const daily = (await pool.query(
@@ -145,12 +157,12 @@ export function mountAnalytics(app, opts = {}) {
       });
     } catch (e) {
       console.error('[analytics] summary failed:', e);
-      res.status(500).json({ error: 'summary_failed' });
+      res.status(500).json({ error: 'summary_failed', message: e.message });
     }
   });
 
   // ---- Minimal HTML dashboard ----
-  app.get(`${base}`, (req, res) => {
+  app.get(`${base}`, (_req, res) => {
     res.type('html').send(`<!doctype html>
 <meta charset="utf-8">
 <title>Analytics</title>
@@ -162,19 +174,26 @@ h1{margin:0 0 12px} table{border-collapse:collapse} td,th{padding:6px 10px;borde
 <table id="daily"></table>
 <script type="module">
   async function run(){
-    const data = await fetch('./summary.json?days=30').then(r=>r.json());
-    document.getElementById('cards').innerHTML =
-      '<p>DAU: <b>'+data.dau+'</b> | WAU: <b>'+data.wau+
-      '</b> | MAU: <b>'+data.mau+'</b> | Avg session: <b>'+data.avgSessionSeconds+'s</b></p>';
-    const rows = (data.daily||[]).map(d => '<tr><td>'+d.day+'</td><td>'+d.uniques+'</td></tr>').join('');
-    document.getElementById('daily').innerHTML = '<tr><th>Day</th><th>Uniques</th></tr>'+rows;
+    try {
+      const r = await fetch('./summary.json?days=30');
+      if (!r.ok) throw new Error('HTTP '+r.status);
+      const data = await r.json();
+      document.getElementById('cards').innerHTML =
+        '<p>DAU: <b>'+data.dau+'</b> | WAU: <b>'+data.wau+
+        '</b> | MAU: <b>'+data.mau+'</b> | Avg session: <b>'+data.avgSessionSeconds+'s</b></p>';
+      const rows = (data.daily||[]).map(d => '<tr><td>'+d.day+'</td><td>'+d.uniques+'</td></tr>').join('');
+      document.getElementById('daily').innerHTML = '<tr><th>Day</th><th>Uniques</th></tr>'+rows;
+    } catch (err) {
+      document.getElementById('cards').textContent = 'Error: ' + err.message;
+    }
   }
   run();
 </script>`);
   });
 
   // ---- Prune: clear ip_full after keepFullDays, drop very old rows after keepAllDays ----
-  app.post(`${base}/prune`, async (req, res) => {
+  app.post(`${base}/prune`, async (_req, res) => {
+    await ready;
     try {
       const cleared = await pool.query(
         `UPDATE events
@@ -191,7 +210,18 @@ h1{margin:0 0 12px} table{border-collapse:collapse} td,th{padding:6px 10px;borde
       res.json({ ip_full_cleared: cleared.rowCount, rows_deleted: deleted.rowCount, keepAllDays });
     } catch (e) {
       console.error('[analytics] prune failed:', e);
-      res.status(500).json({ error: 'prune_failed' });
+      res.status(500).json({ error: 'prune_failed', message: e.message });
+    }
+  });
+
+  // ---- Health: verifies DB connectivity quickly ----
+  app.get(`${base}/health`, async (_req, res) => {
+    try {
+      await ready;
+      const r = await pool.query('SELECT 1 AS ok');
+      res.json({ ok: r.rows?.[0]?.ok === 1 });
+    } catch (e) {
+      res.status(500).json({ ok: false, error: e.message });
     }
   });
 }
