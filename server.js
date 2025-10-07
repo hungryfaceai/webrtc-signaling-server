@@ -8,6 +8,7 @@ import express from 'express';
 import { WebSocketServer } from 'ws';
 import { randomUUID } from 'crypto';
 import cors from 'cors';
+import { mountAnalytics } from 'analytics-server.js'; //https://chatgpt.com/c/68e3afbe-a900-8331-9fd1-d728cdd8a2aa
 
 const PORT    = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
@@ -17,7 +18,8 @@ const app = express();
 const ALLOWED_ORIGINS = ['https://hungryfaceai.github.io', 'http://localhost:3000'];
 app.use(cors({
   origin: (origin, cb) => cb(null, !origin || ALLOWED_ORIGINS.includes(origin)),
-  methods: ['GET', 'OPTIONS'],
+  // allow POST for /a/evt analytics ingest (safe to allow globally)
+  methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type'],
   maxAge: 86400,
   credentials: false
@@ -25,6 +27,22 @@ app.use(cors({
 
 app.get('/', (_req, res) => res.send(`OK (WS at ${WS_PATH})`));
 app.get('/health', (_req, res) => res.send('ok'));
+
+// ── Analytics (anonymous usage + active time + IP trunc/hash) ────────────────
+// Exposes:
+//   POST /a/evt          (ingest)
+//   GET  /a              (mini dashboard)
+//   GET  /a/summary.json (JSON stats)
+//   POST /a/prune        (retention)
+mountAnalytics(app, {
+  base: '/a',
+  dbPath: process.env.ANALYTICS_DB || 'analytics.db',
+  ipSalt: process.env.ANALYTICS_IP_SALT,           // set this in env
+  keepFullDays: 7,                                 // exact IP retention
+  keepAllDays: 180,                                // row retention
+  // allow your front-end origin(s) to call /a/* if cross-origin (e.g. GitHub Pages)
+  allowedOrigins: ['https://hungryfaceai.github.io', 'http://localhost:3000']
+});
 
 // in-memory rooms
 const rooms = new Map(); // roomId -> Set<ws>
