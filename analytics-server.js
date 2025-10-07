@@ -173,9 +173,10 @@ h1{margin:0 0 12px} table{border-collapse:collapse} td,th{padding:6px 10px;borde
 <div id="cards">Loading…</div>
 <table id="daily"></table>
 <script type="module">
+  const BASE = ${JSON.stringify((typeof base !== 'undefined' ? base : '/a'))}; // server var
   async function run(){
     try {
-      const r = await fetch('./summary.json?days=30');
+      const r = await fetch(`${BASE}/summary.json?days=30`);
       if (!r.ok) throw new Error('HTTP '+r.status);
       const data = await r.json();
       document.getElementById('cards').innerHTML =
