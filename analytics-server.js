@@ -27,7 +27,7 @@ export function mountAnalytics(app, opts = {}) {
       const o = (req.headers.origin || '').toLowerCase();
       if (allowed.includes(o)) res.setHeader('Access-Control-Allow-Origin', o);
       res.setHeader('Vary', 'Origin');
-      res.setHeader('Access-Control-Allow-Headers', 'content-type');
+      res.setHeader('Access-Control-Allow-Headers', 'content-type, accept');
       if (req.method === 'OPTIONS') return res.sendStatus(200);
       next();
     });
@@ -62,7 +62,7 @@ export function mountAnalytics(app, opts = {}) {
   app.post(`${base}/evt`, express.json(), async (req, res) => {
     await ready;
     const b = req.body || {};
-    if (!b.ts || !b.installId || !b.sessionId) return res.sendStatus(400);
+    if (!b.installId || !b.sessionId) return res.sendStatus(400);
 
     const ip = getClientIp(req);
 
@@ -127,7 +127,7 @@ export function mountAnalytics(app, opts = {}) {
       )).rows;
 
       const daily = (await pool.query(
-        `SELECT to_char(date_trunc('day', ts AT TIME ZONE 'UTC'), 'YYYY-MM-DD') AS day,
+        `SELECT to_char(date_trunc('day', ts AT TIME ZONE 'Europe/London'), 'YYYY-MM-DD') AS day,
                 COUNT(DISTINCT installId) AS uniques
            FROM events
           WHERE ts >= $1
