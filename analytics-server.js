@@ -452,7 +452,7 @@ export function mountAnalytics(app, opts = {}) {
     .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-bottom:8px}
   </style>
   
-  <h1>Analytics Admin</h1>
+  <h1>Naptio Analytics Admin</h1>
   <div class="controls">
     <label>Days <input id="days" type="number" min="1" max="180" value="7"></label>
     <label>Limit <input id="limit" type="number" min="1" max="2000" value="200"></label>
