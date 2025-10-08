@@ -363,8 +363,12 @@ export function mountAnalytics(app, opts = {}) {
   
       const params = [days, limit];
       const where  = [`ts >= NOW() - ($1 || ' days')::interval`];
-      if (feature) { where.push(`feature = $3`); params.push(feature); }
-  
+      if (feature) {
+        // case-insensitive substring match; escape %/_ so they are literals
+        const pattern = '%' + feature.replace(/[%_]/g, '\\$&') + '%';
+        where.push(`COALESCE(feature,'') ILIKE $3 ESCAPE '\\'`);
+        params.push(pattern);
+      } 
       const sql = `
         SELECT ts, app, feature, page, installId, sessionId, activeMs, kind, ev,
                ip_full, ip_trunc, ip_hash, ua
@@ -397,7 +401,12 @@ export function mountAnalytics(app, opts = {}) {
   
       const params = [days, limit];
       const where  = [`ts >= NOW() - ($1 || ' days')::interval`];
-      if (feature) { where.push(`feature = $3`); params.push(feature); }
+      if (feature) {
+        // case-insensitive substring match; escape %/_ so they are literals
+        const pattern = '%' + feature.replace(/[%_]/g, '\\$&') + '%';
+        where.push(`COALESCE(feature,'') ILIKE $3 ESCAPE '\\'`);
+        params.push(pattern);
+}
   
       const sql = `
         WITH sess AS (
