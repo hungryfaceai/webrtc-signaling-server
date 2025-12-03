@@ -8,7 +8,8 @@ import express from 'express';
 import { WebSocketServer,  WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
 import cors from 'cors';
-import { mountAnalytics } from './analytics-server.js'; //https://chatgpt.com/c/68e3afbe-a900-8331-9fd1-d728cdd8a2aa
+//import { mountAnalytics } from './analytics-server.js'; //https://chatgpt.com/c/68e3afbe-a900-8331-9fd1-d728cdd8a2aa
+import { mountAnalyticsLite } from './analytics-lite.js'; //https://chatgpt.com/c/693019c2-9dd8-832e-9adb-a9c8fe1a3d80
 
 const PORT    = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
@@ -35,12 +36,19 @@ app.get('/health', (_req, res) => res.send('ok'));
 //   GET  /a              (mini dashboard)
 //   GET  /a/summary.json (JSON stats)
 //   POST /a/prune        (retention)
-mountAnalytics(app, {
+/*mountAnalytics(app, {
   base: '/a',
   ipSalt: process.env.ANALYTICS_IP_SALT,           // set this in env
   keepFullDays: 3650,                                 // exact IP retention - should change to 7 (GDPR)
   keepAllDays: 3650,                                // row retention - should change to 180
   // allow your front-end origin(s) to call /a/* if cross-origin (e.g. GitHub Pages)
+  allowedOrigins: ['https://hungryfaceai.github.io', 'http://localhost:3000']
+});
+*/
+//https://chatgpt.com/c/693019c2-9dd8-832e-9adb-a9c8fe1a3d80
+mountAnalyticsLite(app, {
+  base: '/a',
+  ipSalt: process.env.ANALYTICS_IP_SALT,
   allowedOrigins: ['https://hungryfaceai.github.io', 'http://localhost:3000']
 });
 
