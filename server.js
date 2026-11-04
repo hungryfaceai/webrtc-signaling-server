@@ -8,21 +8,35 @@ import express from 'express';
 import { WebSocketServer,  WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
 import cors from 'cors';
-//import { mountAnalytics } from './analytics-server.js'; //https://chatgpt.com/c/68e3afbe-a900-8331-9fd1-d728cdd8a2aa
-import { mountAnalyticsLite } from './analytics-lite.js'; //https://chatgpt.com/c/693019c2-9dd8-832e-9adb-a9c8fe1a3d80
+import { timingSafeEqual } from 'crypto';
 
 const PORT    = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
 
+// Admin key for /rooms (set ADMIN_KEY in the Render environment). If unset, /rooms is disabled.
+const ADMIN_KEY = process.env.ADMIN_KEY || '';
+
+// Abuse limits (overridable via env)
+const MAX_MSG_BYTES       = Number(process.env.MAX_MSG_BYTES)       || 64 * 1024; // SDP offers are ~2–10 KB
+const MAX_MAILBOX_PER_FP  = Number(process.env.MAX_MAILBOX_PER_FP)  || 50;
+const MAX_MAILBOX_FPS     = Number(process.env.MAX_MAILBOX_FPS)     || 1000;
+const MAILBOX_TTL_MS      = Number(process.env.MAILBOX_TTL_MS)      || 10 * 60 * 1000;
+const MAX_ROOM_PEERS      = Number(process.env.MAX_ROOM_PEERS)      || 16;
+const MAX_ID_LEN          = 256;   // room names, fingerprints, peer ids
+
 const app = express();
 
-const ALLOWED_ORIGINS = ['https://hungryfaceai.github.io', 'http://localhost:3000'];
+// Browser origins allowed to use this server (HTTP CORS and WebSocket handshake).
+// Native/non-browser clients send no Origin header and are still allowed.
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://hungryfaceai.github.io,http://localhost:3000,http://localhost:8000,capacitor://localhost')
+  .split(',').map(s => s.trim()).filter(Boolean);
+const originAllowed = (origin) => !origin || ALLOWED_ORIGINS.includes(origin);
+
 app.set('trust proxy', true);
 app.use(cors({
-  origin: (origin, cb) => cb(null, !origin || ALLOWED_ORIGINS.includes(origin)),
-  // allow POST for /a/evt analytics ingest (safe to allow globally)
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
+  origin: (origin, cb) => cb(null, originAllowed(origin)),
+  methods: ['GET', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
   maxAge: 86400,
   credentials: false
 }));
@@ -30,27 +44,9 @@ app.use(cors({
 app.get('/', (_req, res) => res.send(`OK (WS at ${WS_PATH})`));
 app.get('/health', (_req, res) => res.send('ok'));
 
-// ── Analytics (anonymous usage + active time + IP trunc/hash) ────────────────
-// Exposes:
-//   POST /a/evt          (ingest)
-//   GET  /a              (mini dashboard)
-//   GET  /a/summary.json (JSON stats)
-//   POST /a/prune        (retention)
-/*mountAnalytics(app, {
-  base: '/a',
-  ipSalt: process.env.ANALYTICS_IP_SALT,           // set this in env
-  keepFullDays: 3650,                                 // exact IP retention - should change to 7 (GDPR)
-  keepAllDays: 3650,                                // row retention - should change to 180
-  // allow your front-end origin(s) to call /a/* if cross-origin (e.g. GitHub Pages)
-  allowedOrigins: ['https://hungryfaceai.github.io', 'http://localhost:3000']
-});
-*/
-//https://chatgpt.com/c/693019c2-9dd8-832e-9adb-a9c8fe1a3d80
-mountAnalyticsLite(app, {
-  base: '/a',
-  ipSalt: process.env.ANALYTICS_IP_SALT,
-  allowedOrigins: ['https://hungryfaceai.github.io', 'http://localhost:3000']
-});
+// The old self-hosted analytics (/a/*) has been removed: it stored full visitor IPs and
+// exposed them via an unauthenticated stream. Traffic is measured with Umami instead.
+app.all(['/a', '/a/*'], (_req, res) => res.sendStatus(410)); // Gone — old clients stop cleanly
 
 // in-memory rooms
 const rooms = new Map(); // roomId -> Set<ws>
@@ -65,14 +61,44 @@ function deliverFp(toFp, obj) {
     ws.send(JSON.stringify(obj));
     return true;
   }
-  const q = mailbox.get(toFp) || [];
-  q.push(obj);
-  mailbox.set(toFp, q);
+  // Bounded mailbox: cap per recipient and total recipients, so offline/unknown
+  // fingerprints can't be used to fill server memory.
+  let q = mailbox.get(toFp);
+  if (!q) {
+    if (mailbox.size >= MAX_MAILBOX_FPS) {
+      const oldest = mailbox.keys().next().value; // Map keeps insertion order
+      mailbox.delete(oldest);
+    }
+    q = [];
+    mailbox.set(toFp, q);
+  }
+  q.push({ at: Date.now(), msg: obj });
+  if (q.length > MAX_MAILBOX_PER_FP) q.splice(0, q.length - MAX_MAILBOX_PER_FP);
   return false;
 }
 
-app.options('/rooms', cors());
-app.get('/rooms', (_req, res) => {
+// Expire undelivered mailbox entries
+setInterval(() => {
+  const cutoff = Date.now() - MAILBOX_TTL_MS;
+  for (const [fp, q] of mailbox) {
+    while (q.length && q[0].at < cutoff) q.shift();
+    if (!q.length) mailbox.delete(fp);
+  }
+}, 60 * 1000).unref();
+
+function adminAuthorized(req) {
+  if (!ADMIN_KEY) return false;
+  const h = String(req.headers.authorization || '');
+  const got = Buffer.from(h.startsWith('Bearer ') ? h.slice(7) : '');
+  const want = Buffer.from(ADMIN_KEY);
+  return got.length === want.length && timingSafeEqual(got, want);
+}
+
+// Admin-only roster of active rooms (used by utils/rooms and utils/roster).
+app.get('/rooms', (req, res) => {
+  if (!ADMIN_KEY) return res.status(404).send('Not found');
+  if (!adminAuthorized(req)) return res.status(401).send('Unauthorized');
+  res.set('Cache-Control', 'no-store');
   const json = {};
   for (const [room, set] of rooms) json[room] = [...set].map(ws => ({ id: ws.id, role: ws.role }));
   res.json(json);
@@ -82,7 +108,17 @@ const server = app.listen(PORT, () => {
   console.log(`HTTP :${PORT}  | WS path: ${WS_PATH}`);
 });
 
-const wss = new WebSocketServer({ server, path: WS_PATH });
+const wss = new WebSocketServer({
+  server,
+  path: WS_PATH,
+  maxPayload: MAX_MSG_BYTES, // ws default is 100 MB
+  // Reject browser connections from other websites (non-browser clients send no Origin)
+  verifyClient: ({ origin }) => {
+    const ok = originAllowed(origin);
+    if (!ok) console.log(`[WS] REJECT origin=${origin}`);
+    return ok;
+  },
+});
 
 function getRoomSet(roomId) {
   if (!rooms.has(roomId)) rooms.set(roomId, new Set());
@@ -130,6 +166,8 @@ wss.on('connection', (ws, req) => {
   ws.send(JSON.stringify({ type: 'hello', id: ws.id }));
 
   ws.on('pong', () => (ws.isAlive = true));
+  // e.g. "Max payload size exceeded" — ws closes the socket itself; just log it
+  ws.on('error', (e) => console.log(`[WS] ERROR id=${ws.id} ${e?.message || e}`));
 
   ws.on('message', (raw) => {
     let msg;
@@ -140,24 +178,24 @@ wss.on('connection', (ws, req) => {
 
     // ===== ROOMLESS FLOW (no join needed) =====
     // 1) Register fingerprint
-    if (t === 'register' && typeof msg.fp === 'string') {
+    if (t === 'register' && typeof msg.fp === 'string' && msg.fp.length <= MAX_ID_LEN) {
       ws.fingerprint = msg.fp;
       fpClients.set(ws.fingerprint, ws);
       // flush mailbox
       const q = mailbox.get(ws.fingerprint) || [];
       mailbox.delete(ws.fingerprint);
-      for (const mm of q) try { ws.send(JSON.stringify(mm)); } catch {}
+      for (const mm of q) try { ws.send(JSON.stringify(mm.msg)); } catch {}
       console.log(`[REGISTER] fp=${ws.fingerprint} id=${ws.id}`);
       return;
     }
     // 2) Pairing messages (relay by fingerprint)
     //if ((t === 'pair-init' || t === 'pair-ack') && typeof msg.to === 'string') {
-	if ((t === 'pair-init' || t === 'pair-ack' || t === 'pair-done') && typeof msg.to === 'string') {
+	if ((t === 'pair-init' || t === 'pair-ack' || t === 'pair-done') && typeof msg.to === 'string' && msg.to.length <= MAX_ID_LEN) {
       deliverFp(msg.to, msg);
       return;
     }
     // 3) Encrypted signaling relay (by fingerprint)
-    if (t === 'relay' && typeof msg.to === 'string') {
+    if (t === 'relay' && typeof msg.to === 'string' && msg.to.length <= MAX_ID_LEN) {
       deliverFp(msg.to, msg);
       return;
     }
@@ -171,6 +209,12 @@ wss.on('connection', (ws, req) => {
     if (t === 'join' && typeof msg.room === 'string') {
       const nextRoom = msg.room.trim();
       const prevRoom = ws.roomId;
+      if (!nextRoom || nextRoom.length > MAX_ID_LEN) return;
+      if (nextRoom !== prevRoom && (rooms.get(nextRoom)?.size || 0) >= MAX_ROOM_PEERS) {
+        console.log(`[JOIN] REJECT id=${ws.id} room=${nextRoom} (full)`);
+        try { ws.send(JSON.stringify({ type: 'error', reason: 'room-full' })); } catch {}
+        return;
+      }
     
 														   
       if (prevRoom && prevRoom !== nextRoom && rooms.has(prevRoom)) {
