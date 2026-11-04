@@ -25,6 +25,22 @@ const MAX_ROOM_PEERS      = Number(process.env.MAX_ROOM_PEERS)      || 16;
 const MAX_ID_LEN          = 256;   // room names, fingerprints, peer ids
 
 const app = express();
+app.disable('x-powered-by');
+
+// ── Machine checks ─────────────────────────────────────────────────────────────
+// /keepalive is for an external uptime service (e.g. UptimeRobot) that requests it about
+// every 10 minutes, so Render's free plan doesn't spin the service down after 15 minutes
+// without traffic (the next visit would then wait ~1 minute while it starts).
+// /health is the platform health check. Both are registered before CORS and every other
+// middleware, answer only "ok", touch no rooms or sockets, set no cookies, log nothing,
+// and are never cached, so each request really reaches the server.
+function probe(_req, res) {
+  res.set('Cache-Control', 'no-store');
+  res.type('text/plain').send('ok');
+}
+const PROBE_PATHS = ['/keepalive', '/health'];
+for (const p of PROBE_PATHS) app.get(p, probe); // Express answers HEAD from GET routes
+app.set('etag', false); // no ETag → no 304 "not modified" short-cut for monitors
 
 // Browser origins allowed to use this server (HTTP CORS and WebSocket handshake).
 // Native/non-browser clients send no Origin header and are still allowed.
@@ -42,7 +58,6 @@ app.use(cors({
 }));
 
 app.get('/', (_req, res) => res.send(`OK (WS at ${WS_PATH})`));
-app.get('/health', (_req, res) => res.send('ok'));
 
 // The old self-hosted analytics (/a/*) has been removed: it stored full visitor IPs and
 // exposed them via an unauthenticated stream. Traffic is measured with Umami instead.
