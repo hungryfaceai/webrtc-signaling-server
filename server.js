@@ -8,13 +8,14 @@ import express from 'express';
 import { WebSocketServer,  WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
 import cors from 'cors';
-import { timingSafeEqual } from 'crypto';
+import { createAdminAuth } from './admin-auth.js';
 
 const PORT    = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
 
-// Admin key for /rooms (set ADMIN_KEY in the Render environment). If unset, /rooms is disabled.
-const ADMIN_KEY = process.env.ADMIN_KEY || '';
+// Admin sign-in for /rooms (see admin-auth.js): ADMIN_PASSWORD_HASH on Render enables password
+// sign-in; the older ADMIN_KEY still works until it is removed. With neither, /rooms is disabled.
+const adminAuth = createAdminAuth(process.env);
 
 // Abuse limits (overridable via env)
 const MAX_MSG_BYTES       = Number(process.env.MAX_MSG_BYTES)       || 64 * 1024; // SDP offers are ~2–10 KB
@@ -48,10 +49,13 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://hungryfaceai.gi
   .split(',').map(s => s.trim()).filter(Boolean);
 const originAllowed = (origin) => !origin || ALLOWED_ORIGINS.includes(origin);
 
-app.set('trust proxy', true);
+// Render puts exactly one proxy in front of the app. Trusting only that hop means req.ip is the
+// real client address and can't be spoofed with a forged X-Forwarded-For (matters for the
+// sign-in attempt limits). Override with TRUST_PROXY_HOPS if the hosting changes.
+app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1));
 app.use(cors({
   origin: (origin, cb) => cb(null, originAllowed(origin)),
-  methods: ['GET', 'OPTIONS'],
+  methods: ['GET', 'POST', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization'],
   maxAge: 86400,
   credentials: false
@@ -101,18 +105,18 @@ setInterval(() => {
   }
 }, 60 * 1000).unref();
 
-function adminAuthorized(req) {
-  if (!ADMIN_KEY) return false;
-  const h = String(req.headers.authorization || '');
-  const got = Buffer.from(h.startsWith('Bearer ') ? h.slice(7) : '');
-  const want = Buffer.from(ADMIN_KEY);
-  return got.length === want.length && timingSafeEqual(got, want);
-}
+// Admin sign-in: exchange the password for a short-lived session token.
+// Body is tiny JSON; anything larger is refused before the (deliberately slow) password check.
+app.post('/admin/login', express.json({ limit: '2kb' }), (req, res) => adminAuth.login(req, res));
+app.get('/admin/config', (_req, res) => {
+  res.set('Cache-Control', 'no-store');
+  res.json({ password: adminAuth.passwordEnabled, legacyKey: adminAuth.legacyEnabled });
+});
 
 // Admin-only roster of active rooms (used by utils/rooms and utils/roster).
 app.get('/rooms', (req, res) => {
-  if (!ADMIN_KEY) return res.status(404).send('Not found');
-  if (!adminAuthorized(req)) return res.status(401).send('Unauthorized');
+  if (!adminAuth.enabled) return res.status(404).send('Not found');
+  if (!adminAuth.authorized(req)) return res.status(401).send('Unauthorized');
   res.set('Cache-Control', 'no-store');
   const json = {};
   for (const [room, set] of rooms) json[room] = [...set].map(ws => ({ id: ws.id, role: ws.role }));
