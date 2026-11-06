@@ -227,6 +227,8 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
       group by room having bool_or(role = 'sender') and bool_or(role = 'receiver')`);
     const activeNow = new Set(live.rows.map(x => x.room));
     const rooms = new Map();
+    // Every room connected right now is listed, even if none of its devices has a usable IP address.
+    for (const room of activeNow) rooms.set(room, { room, activeNow: true, cameras: [], viewers: [] });
     for (const x of r.rows) {
       if (!rooms.has(x.room)) rooms.set(x.room, { room: x.room, activeNow: activeNow.has(x.room), cameras: [], viewers: [] });
       const loc = geo ? geo.lookup(x.ip) : null;
@@ -239,8 +241,8 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
     const dedupe = list => [...new Map(list.map(l => [l.lat + ',' + l.lon, l])).values()];
     return {
       from: new Date(start).toISOString(), to: new Date(to).toISOString(), allTime: !from,
-      rooms: [...rooms.values()].map(x => ({ ...x, cameras: dedupe(x.cameras), viewers: dedupe(x.viewers) }))
-                                .filter(x => x.cameras.length || x.viewers.length),
+      // Rooms without a known location are still returned (located: false) so counts are right and they can be listed.
+      rooms: [...rooms.values()].map(x => ({ ...x, cameras: dedupe(x.cameras), viewers: dedupe(x.viewers), located: !!(x.cameras.length || x.viewers.length) })),
     };
   }
 

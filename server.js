@@ -156,6 +156,7 @@ app.get('/admin/analytics/rooms', analyticsRoute(range => activity.roomAnalytics
 app.get('/admin/analytics/map', analyticsRoute(async range => ({
   ...(await activity.connectionMap({ ...range, geo })),
   geoReady: !!geo?.ready,
+  geoEnabled: !!geo?.enabled,
   attribution: 'IP Geolocation by DB-IP (https://db-ip.com)',
 })));
 
