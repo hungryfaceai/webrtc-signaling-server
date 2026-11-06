@@ -9,6 +9,7 @@ import { WebSocketServer,  WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
 import cors from 'cors';
 import { createAdminAuth } from './admin-auth.js';
+import { createActivityLog, clientIp } from './activity-log.js';
 
 const PORT    = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
@@ -53,6 +54,9 @@ const originAllowed = (origin) => !origin || ALLOWED_ORIGINS.includes(origin);
 // real client address and can't be spoofed with a forged X-Forwarded-For (matters for the
 // sign-in attempt limits). Override with TRUST_PROXY_HOPS if the hosting changes.
 app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1));
+const TRUST_HOPS = Number(process.env.TRUST_PROXY_HOPS ?? 1);
+// Room activity history (Supabase/Postgres). Off unless ACTIVITY_DATABASE_URL is set; never blocks signalling.
+const activity = createActivityLog();
 app.use(cors({
   origin: (origin, cb) => cb(null, originAllowed(origin)),
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -123,6 +127,20 @@ app.get('/rooms', (req, res) => {
   res.json(json);
 });
 
+// Admin-only room analytics: per room, time with a Camera AND a Viewer connected (from the activity history).
+//   GET /admin/analytics/rooms?from=ISO&to=ISO   (default: last 7 days)
+app.get('/admin/analytics/rooms', async (req, res) => {
+  if (!adminAuth.enabled) return res.status(404).send('Not found');
+  if (!adminAuth.authorized(req)) return res.status(401).send('Unauthorized');
+  res.set('Cache-Control', 'no-store');
+  if (!activity.enabled) return res.status(503).json({ error: 'Activity history is not configured on the server.' });
+  const to = req.query.to ? new Date(String(req.query.to)) : new Date();
+  const from = req.query.from ? new Date(String(req.query.from)) : new Date(to.getTime() - 7 * 86400_000);
+  if (isNaN(from) || isNaN(to) || from >= to || to - from > 400 * 86400_000) return res.status(400).json({ error: 'Invalid date range.' });
+  try { res.json(await activity.roomAnalytics({ from, to })); }
+  catch (e) { console.log('[activity] analytics failed:', e.message); res.status(503).json({ error: 'Activity history is temporarily unavailable.' }); }
+});
+
 const server = app.listen(PORT, () => {
   console.log(`HTTP :${PORT}  | WS path: ${WS_PATH}`);
 });
@@ -179,6 +197,7 @@ wss.on('connection', (ws, req) => {
   ws.isAlive = true;
   ws.fingerprint = null; // NEW
 
+  ws.ip = clientIp(req, TRUST_HOPS);
   console.log(`[WS] CONNECT id=${ws.id} ip=${req.socket.remoteAddress} url=${req.url}`);
 
   // say hello with our id
@@ -237,6 +256,7 @@ wss.on('connection', (ws, req) => {
     
 														   
       if (prevRoom && prevRoom !== nextRoom && rooms.has(prevRoom)) {
+        activity.leave({ connId: ws.id });
         const prevSet = rooms.get(prevRoom);
         prevSet.delete(ws);
         if (prevSet.size === 0) {
@@ -250,7 +270,9 @@ wss.on('connection', (ws, req) => {
       ws.roomId = nextRoom;
       ws.role = (msg.role === 'sender') ? 'sender' : 'receiver';
     
+      const alreadyIn = rooms.get(nextRoom)?.has(ws);
       getRoomSet(nextRoom).add(ws);
+      if (!alreadyIn) activity.join({ connId: ws.id, room: nextRoom, role: ws.role, ip: ws.ip });
       console.log(`[JOIN] id=${ws.id} role=${ws.role} room=${nextRoom} peers=${rooms.get(nextRoom).size}`);
     
 																			
@@ -285,6 +307,7 @@ wss.on('connection', (ws, req) => {
     }
 
     const { roomId } = ws;
+    if (roomId) activity.leave({ connId: ws.id });
     if (roomId && rooms.has(roomId)) {
       const set = rooms.get(roomId);
       set.delete(ws);
@@ -308,6 +331,18 @@ setInterval(() => {
     try { ws.ping(); } catch {}
   });
 }, 30000);
+
+// Render stops the old instance on every deploy (SIGTERM): close open activity rows with the right time.
+let shuttingDown = false;
+async function shutdown(sig) {
+  if (shuttingDown) return; shuttingDown = true;
+  console.log(`[${sig}] closing activity rows`);
+  const t = setTimeout(() => process.exit(0), 8000); t.unref?.();   // never hang a deploy
+  try { await activity.close(); } catch {}
+  process.exit(0);
+}
+process.on('SIGTERM', () => shutdown('SIGTERM'));
+process.on('SIGINT',  () => shutdown('SIGINT'));
 
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
 process.on('uncaughtException',  (e) => console.error('[uncaughtException]', e));
