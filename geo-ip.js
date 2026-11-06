@@ -5,21 +5,23 @@
 // and refreshed monthly; IP addresses are never sent to any third-party service.
 //
 // Env:
-//   GEOIP_ENABLED=0     turn off (no download, lookups return null)
+//   GEOIP_ENABLED=1     turn ON (default OFF: the full City Lite file needs ~300 MB of memory, more than
+//                       Render's free 512 MB plan can spare; only enable on a plan with enough memory)
 //   GEOIP_FILE          path to a local .mmdb file instead of downloading (tests / offline)
 
 import fs from 'node:fs';
 import zlib from 'node:zlib';
 import { Reader } from 'mmdb-lib';
 
-const MONTH_MS = 30 * 86400_000;
+const DAY_MS = 86400_000;   // timers must stay below 2^31 ms (~24.8 days) or Node fires them immediately
 
 function monthUrl(d) {
   const y = d.getUTCFullYear(), m = String(d.getUTCMonth() + 1).padStart(2, '0');
   return `https://download.db-ip.com/free/dbip-city-lite-${y}-${m}.mmdb.gz`;
 }
 
-export function createGeoIp({ enabled = process.env.GEOIP_ENABLED !== '0', file = process.env.GEOIP_FILE, fetchImpl = globalThis.fetch } = {}) {
+export function createGeoIp({ enabled, file = process.env.GEOIP_FILE, fetchImpl = globalThis.fetch } = {}) {
+  if (enabled === undefined) enabled = process.env.GEOIP_ENABLED === '1' || !!file;   // a local file means "use it"
   let reader = null, loadedFrom = null, loading = null;
 
   async function download() {
@@ -53,9 +55,14 @@ export function createGeoIp({ enabled = process.env.GEOIP_ENABLED !== '0', file 
     return loading;
   }
 
+  if (!enabled) console.log('[geoip] off (set GEOIP_ENABLED=1 on a plan with enough memory to show map locations)');
   if (enabled) {
     load();
-    if (!file) { const t = setInterval(load, MONTH_MS); t.unref?.(); }
+    // Check once a day; download only when a newer monthly file is out (DB-IP publishes on the 1st).
+    if (!file) {
+      const t = setInterval(() => { const want = monthUrl(new Date()); if (loadedFrom !== want) load(); }, DAY_MS);
+      t.unref?.();
+    }
   }
 
   /** { city, region, country, lat, lon } or null (unknown / private address / database not loaded). */
