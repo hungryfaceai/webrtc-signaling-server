@@ -16,6 +16,7 @@
 // Env:
 //   ACTIVITY_DATABASE_URL  postgres connection string (Supabase "Session pooler" URL recommended)
 //   ACTIVITY_RETENTION_DAYS  delete rows older than this (default 395 ≈ 13 months; 0 = keep forever)
+//   ACTIVITY_SESSION_GAP_SECONDS  sessions closer than this are one session (default 120: phone lock / Wi-Fi blips)
 
 import pg from 'pg';
 import net from 'node:net';
@@ -57,7 +58,8 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
   if (!url && !poolFactory) {
     console.log('[activity] disabled (no ACTIVITY_DATABASE_URL)');
     const noop = () => {};
-    return { enabled: false, join: noop, leave: noop, roomAnalytics: async () => { throw new Error('activity log disabled'); }, close: async () => {} };
+    const off = async () => { throw new Error('activity log disabled'); };
+    return { enabled: false, join: noop, leave: noop, roomAnalytics: off, connectionMap: off, close: async () => {} };
   }
 
   const pool = poolFactory ? poolFactory() : new Pool({
@@ -131,18 +133,17 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
     pruneTimer = setInterval(prune, 24 * 3600_000); pruneTimer.unref?.();
   }
 
-  /**
-   * Room analytics for [from, to): for every room, the periods during which at least one Camera and at least
-   * one Viewer were present at the same time ("sessions"). A sweep over join/leave events, all in SQL.
-   * Returns { from, to, rooms: [{ room, sessions, totalSeconds, avgSeconds, longestSeconds, lastActive, activeNow }] }.
-   */
-  async function roomAnalytics({ from, to }) {
-    await ensureSchema();
-    const sql = `
+  // Short gaps (a phone locking its screen, Wi-Fi hopping) are part of the same session.
+  const sessionGapS = Number(process.env.ACTIVITY_SESSION_GAP_SECONDS ?? 120);
+
+  // Shared SQL: sessions per room in [$1, $2) = periods with >= 1 sender AND >= 1 receiver present,
+  // with sessions separated by a gap shorter than $3 seconds merged into one.
+  const SESSIONS_SQL = `
       with p as (                                   -- presence clipped to the window
-        select room, role,
+        select room, role, host(ip) as ip,
                greatest(joined_at, $1::timestamptz)                 as s,
-               least(coalesce(left_at, now()), $2::timestamptz)      as e
+               least(coalesce(left_at, now()), $2::timestamptz)      as e,
+               left_at is null                                       as open
         from room_presence
         where joined_at < $2 and coalesce(left_at, now()) > $1
       ),
@@ -159,31 +160,87 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
       seg as (                                      -- constant-state segments [t, next_t)
         select room, t, lead(t) over (partition by room order by t) as next_t, senders > 0 and receivers > 0 as active from steps
       ),
-      grp as (                                      -- merge consecutive active segments into sessions
+      grp as (                                      -- consecutive active segments
         select *, sum(case when active then 0 else 1 end) over (partition by room order by t) as g from seg where next_t is not null
       ),
-      sessions as (
+      raw_sessions as (
         select room, min(t) as started, max(next_t) as ended from grp where active group by room, g
-      )
+      ),
+      gapped as (                                   -- a new session only if the gap since the previous one is long enough
+        select *, case when started - lag(ended) over (partition by room order by started) < make_interval(secs => $3) then 0 else 1 end as is_new
+        from raw_sessions
+      ),
+      sessions as (
+        select room, min(started) as started, max(ended) as ended,
+               sum(extract(epoch from ended - started)) as active_s          -- connected time only (gaps not counted)
+        from (select *, sum(is_new) over (partition by room order by started) as sid from gapped) x
+        group by room, sid
+      )`;
+
+  /**
+   * Room analytics for [from, to) (from = null → all time). Per room: sessions, connected time, average and
+   * longest session, last active, active now.
+   */
+  async function roomAnalytics({ from, to }) {
+    await ensureSchema();
+    const start = from || (await pool.query('select coalesce(min(joined_at), now()) as m from room_presence')).rows[0].m;
+    const sql = SESSIONS_SQL + `
       select room,
-             count(*)::int                                            as sessions,
-             coalesce(sum(extract(epoch from ended - started)), 0)::float8 as total_s,
-             coalesce(max(extract(epoch from ended - started)), 0)::float8 as longest_s,
-             max(ended)                                               as last_active
+             count(*)::int                                   as sessions,
+             coalesce(sum(active_s), 0)::float8              as total_s,
+             coalesce(max(active_s), 0)::float8              as longest_s,
+             max(ended)                                      as last_active
       from sessions group by room order by total_s desc`;
-    const r = await pool.query(sql, [from, to]);
-    // Rooms with a Camera and a Viewer right now (open rows only)
+    const r = await pool.query(sql, [start, to, sessionGapS]);
     const live = await pool.query(`
       select room from room_presence where left_at is null
       group by room having bool_or(role = 'sender') and bool_or(role = 'receiver')`);
     const activeNow = new Set(live.rows.map(x => x.room));
     return {
-      from: new Date(from).toISOString(), to: new Date(to).toISOString(),
+      from: new Date(start).toISOString(), to: new Date(to).toISOString(), allTime: !from, sessionGapSeconds: sessionGapS,
       rooms: r.rows.map(x => ({
         room: x.room, sessions: x.sessions, totalSeconds: Math.round(x.total_s),
         avgSeconds: x.sessions ? Math.round(x.total_s / x.sessions) : 0, longestSeconds: Math.round(x.longest_s),
         lastActive: x.last_active ? new Date(x.last_active).toISOString() : null, activeNow: activeNow.has(x.room),
       })),
+    };
+  }
+
+  /**
+   * Map data for [from, to) (from = null → all time): per room with at least one Camera+Viewer session, the
+   * IP addresses of the Cameras and Viewers that took part, and whether the room is connected right now.
+   * Locations are added by the caller (geo-ip.js); IPs are not returned to the browser.
+   */
+  async function connectionMap({ from, to, geo }) {
+    await ensureSchema();
+    const start = from || (await pool.query('select coalesce(min(joined_at), now()) as m from room_presence')).rows[0].m;
+    const sql = SESSIONS_SQL + `,
+      parts as (                                    -- devices present during a session of their room
+        select distinct p.room, p.role, p.ip, p.open
+        from p join sessions s on s.room = p.room and p.s < s.ended and p.e > s.started
+        where p.ip is not null
+      )
+      select room, role, ip, bool_or(open) as open from parts group by room, role, ip`;
+    const r = await pool.query(sql, [start, to, sessionGapS]);
+    const live = await pool.query(`
+      select room from room_presence where left_at is null
+      group by room having bool_or(role = 'sender') and bool_or(role = 'receiver')`);
+    const activeNow = new Set(live.rows.map(x => x.room));
+    const rooms = new Map();
+    for (const x of r.rows) {
+      if (!rooms.has(x.room)) rooms.set(x.room, { room: x.room, activeNow: activeNow.has(x.room), cameras: [], viewers: [] });
+      const loc = geo ? geo.lookup(x.ip) : null;
+      // An active room only shows the devices connected right now; a past one shows everyone who took part.
+      const entry = rooms.get(x.room);
+      if (entry.activeNow && !x.open) continue;
+      if (!loc) continue;
+      (x.role === 'sender' ? entry.cameras : entry.viewers).push(loc);
+    }
+    const dedupe = list => [...new Map(list.map(l => [l.lat + ',' + l.lon, l])).values()];
+    return {
+      from: new Date(start).toISOString(), to: new Date(to).toISOString(), allTime: !from,
+      rooms: [...rooms.values()].map(x => ({ ...x, cameras: dedupe(x.cameras), viewers: dedupe(x.viewers) }))
+                                .filter(x => x.cameras.length || x.viewers.length),
     };
   }
 
@@ -195,5 +252,5 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
   }
 
   ensureSchema().catch(e => console.log('[activity] database not reachable yet:', e.message));
-  return { enabled: true, join, leave, roomAnalytics, close, _pool: pool, _flushed: async () => { while (queue.length || flushing) await new Promise(r => setTimeout(r, 20)); } };
+  return { enabled: true, join, leave, roomAnalytics, connectionMap, close, _pool: pool, _flushed: async () => { while (queue.length || flushing) await new Promise(r => setTimeout(r, 20)); } };
 }

@@ -10,6 +10,7 @@ import { randomUUID } from 'crypto';
 import cors from 'cors';
 import { createAdminAuth } from './admin-auth.js';
 import { createActivityLog, clientIp } from './activity-log.js';
+import { createGeoIp } from './geo-ip.js';
 
 const PORT    = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
@@ -57,6 +58,8 @@ app.set('trust proxy', Number(process.env.TRUST_PROXY_HOPS ?? 1));
 const TRUST_HOPS = Number(process.env.TRUST_PROXY_HOPS ?? 1);
 // Room activity history (Supabase/Postgres). Off unless ACTIVITY_DATABASE_URL is set; never blocks signalling.
 const activity = createActivityLog();
+// Approximate location of an IP (DB-IP City Lite, looked up locally; only if activity history is on).
+const geo = activity.enabled ? createGeoIp() : null;
 app.use(cors({
   origin: (origin, cb) => cb(null, originAllowed(origin)),
   methods: ['GET', 'POST', 'OPTIONS'],
@@ -128,18 +131,33 @@ app.get('/rooms', (req, res) => {
 });
 
 // Admin-only room analytics: per room, time with a Camera AND a Viewer connected (from the activity history).
-//   GET /admin/analytics/rooms?from=ISO&to=ISO   (default: last 7 days)
-app.get('/admin/analytics/rooms', async (req, res) => {
-  if (!adminAuth.enabled) return res.status(404).send('Not found');
-  if (!adminAuth.authorized(req)) return res.status(401).send('Unauthorized');
-  res.set('Cache-Control', 'no-store');
-  if (!activity.enabled) return res.status(503).json({ error: 'Activity history is not configured on the server.' });
-  const to = req.query.to ? new Date(String(req.query.to)) : new Date();
-  const from = req.query.from ? new Date(String(req.query.from)) : new Date(to.getTime() - 7 * 86400_000);
-  if (isNaN(from) || isNaN(to) || from >= to || to - from > 400 * 86400_000) return res.status(400).json({ error: 'Invalid date range.' });
-  try { res.json(await activity.roomAnalytics({ from, to })); }
-  catch (e) { console.log('[activity] analytics failed:', e.message); res.status(503).json({ error: 'Activity history is temporarily unavailable.' }); }
-});
+//   GET /admin/analytics/rooms?from=ISO&to=ISO   (default: last 7 days; ?all=1 for all time)
+//   GET /admin/analytics/map?from=ISO&to=ISO     approximate locations of Cameras/Viewers (never IPs)
+function analyticsRange(q) {
+  const to = q.to ? new Date(String(q.to)) : new Date();
+  if (q.all === '1') return isNaN(to) ? null : { from: null, to };
+  const from = q.from ? new Date(String(q.from)) : new Date(to.getTime() - 7 * 86400_000);
+  if (isNaN(from) || isNaN(to) || from >= to || to - from > 400 * 86400_000) return null;
+  return { from, to };
+}
+function analyticsRoute(handler) {
+  return async (req, res) => {
+    if (!adminAuth.enabled) return res.status(404).send('Not found');
+    if (!adminAuth.authorized(req)) return res.status(401).send('Unauthorized');
+    res.set('Cache-Control', 'no-store');
+    if (!activity.enabled) return res.status(503).json({ error: 'Activity history is not configured on the server.' });
+    const range = analyticsRange(req.query);
+    if (!range) return res.status(400).json({ error: 'Invalid date range.' });
+    try { res.json(await handler(range)); }
+    catch (e) { console.log('[activity] analytics failed:', e.message); res.status(503).json({ error: 'Activity history is temporarily unavailable.' }); }
+  };
+}
+app.get('/admin/analytics/rooms', analyticsRoute(range => activity.roomAnalytics(range)));
+app.get('/admin/analytics/map', analyticsRoute(async range => ({
+  ...(await activity.connectionMap({ ...range, geo })),
+  geoReady: !!geo?.ready,
+  attribution: 'IP Geolocation by DB-IP (https://db-ip.com)',
+})));
 
 const server = app.listen(PORT, () => {
   console.log(`HTTP :${PORT}  | WS path: ${WS_PATH}`);
