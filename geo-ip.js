@@ -1,11 +1,12 @@
-// geo-ip.js — approximate location (country + lat/lon) for an IP address, looked up on this server.
+// geo-ip.js — approximate location (city, country, lat/lon) for an IP address, looked up on this server.
 //
 // Data: the free DB-IP "City Lite" database (CC BY 4.0: anything showing these results must credit
 // "IP Geolocation by DB-IP" with a link to https://db-ip.com). The CSV is downloaded from DB-IP and
 // STREAMED into compact typed arrays (~70 MB), so it fits a small server. IP addresses are never sent to
 // any third-party service.
 //
-// Each table row is one address range: start (uint32), lat/lon (int16, degrees × 180 ≈ 600 m), country.
+// Each table row is one address range: start (uint32), lat/lon (int16, degrees × 180 ≈ 600 m), country, city.
+// City names are stored once in a list; each range keeps a 24-bit index into it (uint16 + uint8 arrays, ~3 bytes).
 // IPv4 uses the full address; IPv6 uses its first 32 bits (the network part, enough for a map dot).
 //
 // Env:
@@ -29,6 +30,27 @@ function monthUrl(d) {
   const y = d.getUTCFullYear(),
     m = String(d.getUTCMonth() + 1).padStart(2, '0');
   return `https://download.db-ip.com/free/dbip-city-lite-${y}-${m}.csv.gz`;
+}
+
+// City field of a DB-IP row: the quoted-or-plain field just before ",lat,lon" (the last two fields).
+// `end` is the index of the comma before lat. Handles "quoted, names" and doubled "" quotes.
+function cityBefore(line, end) {
+  if (line[end - 1] !== '"') {
+    const c = line.lastIndexOf(',', end - 1);
+    return line.slice(c + 1, end);
+  }
+  let i = end - 2; // walk back to the opening quote, skipping doubled ""
+  while (i >= 0) {
+    if (line[i] === '"') {
+      if (line[i - 1] === '"') {
+        i -= 2;
+        continue;
+      }
+      break;
+    }
+    i--;
+  }
+  return line.slice(i + 1, end - 1).replace(/""/g, '"');
 }
 
 // Growable typed array: doubles when full, so millions of rows never sit in a plain JS array.
@@ -89,12 +111,16 @@ async function buildTables(gzStream) {
     la: new Grow(Int16Array),
     lo: new Grow(Int16Array),
     cc: new Grow(Uint8Array),
+    ciLo: new Grow(Uint16Array), // city index, low 16 bits
+    ciHi: new Grow(Uint8Array), // city index, high 8 bits (up to 16.7 M names)
     last: '',
   });
   const v4 = mk(),
     v6 = mk(),
     countries = [],
-    cIdx = new Map();
+    cIdx = new Map(),
+    cities = [''], // index 0 = no city
+    cityIdx = new Map();
   const rl = readline.createInterface({ input: gzStream.pipe(zlib.createGunzip()), crlfDelay: Infinity });
   for await (const line of rl) {
     // start,end,continent,country,region,"city",lat,lon
@@ -115,7 +141,8 @@ async function buildTables(gzStream) {
       la = 0;
       lo = 0;
     }
-    const key = unknown ? 'ZZ' : la + ',' + lo + ',' + cc;
+    const city = unknown ? '' : cityBefore(line, e1);
+    const key = unknown ? 'ZZ' : la + ',' + lo + ',' + cc + ',' + city;
     if (key === t.last) continue; // same place as the previous range: extend it
     let ci = 255; // 255 = unknown (gaps / reserved ranges stay "unknown", not the previous place)
     if (!unknown) {
@@ -131,10 +158,26 @@ async function buildTables(gzStream) {
     t.la.push(la);
     t.lo.push(lo);
     t.cc.push(ci);
+    let ix = city ? cityIdx.get(city) : 0;
+    if (ix === undefined) {
+      ix = cities.length;
+      cities.push(city);
+      cityIdx.set(city, ix);
+    }
+    if (ix > 0xffffff) ix = 0;
+    t.ciLo.push(ix & 0xffff);
+    t.ciHi.push(ix >>> 16);
     t.last = key;
   }
-  const fin = (t) => ({ s: t.s.done(), la: t.la.done(), lo: t.lo.done(), cc: t.cc.done() });
-  return { v4: fin(v4), v6: fin(v6), countries };
+  const fin = (t) => ({
+    s: t.s.done(),
+    la: t.la.done(),
+    lo: t.lo.done(),
+    cc: t.cc.done(),
+    ciLo: t.ciLo.done(),
+    ciHi: t.ciHi.done(),
+  });
+  return { v4: fin(v4), v6: fin(v6), countries, cities };
 }
 
 /**
@@ -192,7 +235,14 @@ export function createGeoIp({
         loadedFrom = src.from;
         const mb = Math.round(
           [next.v4, next.v6].reduce(
-            (a, t) => a + t.s.byteLength + t.la.byteLength + t.lo.byteLength + t.cc.byteLength,
+            (a, t) =>
+              a +
+              t.s.byteLength +
+              t.la.byteLength +
+              t.lo.byteLength +
+              t.cc.byteLength +
+              t.ciLo.byteLength +
+              t.ciHi.byteLength,
             0
           ) / 1048576
         );
@@ -222,7 +272,7 @@ export function createGeoIp({
     }
   }
 
-  /** { country, lat, lon } or null (unknown / private address / not loaded). */
+  /** { city, country, lat, lon } or null (unknown / private address / not loaded). city may be null. */
   function lookup(ip) {
     if (!tables || !ip) return null;
     try {
@@ -232,8 +282,9 @@ export function createGeoIp({
       const t = v6 ? tables.v6 : tables.v4;
       const i = find(t.s, v6 ? ip6top32(s) : ip4(s));
       if (i < 0 || t.cc[i] === 255) return null;
+      const ix = t.ciLo[i] | (t.ciHi[i] << 16);
       return {
-        city: null,
+        city: tables.cities[ix] || null,
         region: null,
         country: tables.countries[t.cc[i]] || null,
         lat: Math.round((t.la[i] / SCALE) * 1000) / 1000,

@@ -232,7 +232,7 @@ export function createActivityLog({
    * Room analytics for [from, to) (from = null → all time). Per room: sessions, connected time, average and
    * longest session, last active, active now.
    */
-  async function roomAnalytics({ from, to }) {
+  async function roomAnalytics({ from, to, geo }) {
     await ensureSchema();
     const start =
       from || (await pool.query('select coalesce(min(joined_at), now()) as m from room_presence')).rows[0].m;
@@ -250,12 +250,16 @@ export function createActivityLog({
       select room from room_presence where left_at is null
       group by room having bool_or(role = 'sender') and bool_or(role = 'receiver')`);
     const activeNow = new Set(live.rows.map((x) => x.room));
+    const places = geo && geo.ready ? await roomPlaces(start, to, geo) : new Map();
     return {
       from: new Date(start).toISOString(),
       to: new Date(to).toISOString(),
       allTime: !from,
       sessionGapSeconds: sessionGapS,
+      geoReady: !!(geo && geo.ready),
       rooms: r.rows.map((x) => ({
+        // Distinct approximate places ("city, country") of the devices in this room's sessions. Never IPs.
+        places: places.get(x.room) || [],
         room: x.room,
         sessions: x.sessions,
         totalSeconds: Math.round(x.total_s),
@@ -265,6 +269,42 @@ export function createActivityLog({
         activeNow: activeNow.has(x.room),
       })),
     };
+  }
+
+  /**
+   * room -> [{ city, country }] for the Cameras and Viewers that took part in a session in [start, to).
+   * Most-seen place first; at most 5 per room.
+   */
+  async function roomPlaces(start, to, geo) {
+    const r = await pool.query(
+      SESSIONS_SQL +
+        `
+      select distinct p.room, p.ip
+      from p join sessions s on s.room = p.room and p.s < s.ended and p.e > s.started
+      where p.ip is not null`,
+      [start, to, sessionGapS]
+    );
+    const byRoom = new Map();
+    for (const x of r.rows) {
+      const loc = geo.lookup(x.ip);
+      if (!loc || !loc.country) continue;
+      const key = (loc.city || '') + '|' + loc.country;
+      const m = byRoom.get(x.room) || new Map();
+      const e = m.get(key) || { city: loc.city || null, country: loc.country, n: 0 };
+      e.n++;
+      m.set(key, e);
+      byRoom.set(x.room, m);
+    }
+    const out = new Map();
+    for (const [room, m] of byRoom)
+      out.set(
+        room,
+        [...m.values()]
+          .sort((a, b) => b.n - a.n)
+          .slice(0, 5)
+          .map(({ city, country }) => ({ city, country }))
+      );
+    return out;
   }
 
   /**

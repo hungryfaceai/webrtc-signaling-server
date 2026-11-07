@@ -172,7 +172,7 @@ function analyticsRoute(handler) {
 }
 app.get(
   '/admin/analytics/rooms',
-  analyticsRoute((range) => activity.roomAnalytics(range))
+  analyticsRoute((range) => activity.roomAnalytics({ ...range, geo }))
 );
 app.get(
   '/admin/analytics/map',
