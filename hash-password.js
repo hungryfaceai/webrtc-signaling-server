@@ -8,6 +8,8 @@
 // environment variable ADMIN_PASSWORD_HASH. The password itself is not stored anywhere.
 import { hashPassword } from './admin-auth.js';
 
+// Prompts on stderr and reads a line from stdin. On a terminal, input is read in raw mode so it is not echoed;
+// piped input reads one line.
 function ask(question) {
   return new Promise((resolve) => {
     // Prompts go to stderr, so stdout carries ONLY the hash (clean to copy or redirect).
@@ -51,6 +53,7 @@ function ask(question) {
   });
 }
 
+// Minimum length matches hashPassword() in admin-auth.js.
 const pw1 = await ask('New admin password (at least 12 characters): ');
 if (pw1.length < 12) {
   console.error('Too short: use at least 12 characters (a passphrase of 4+ words is ideal).');

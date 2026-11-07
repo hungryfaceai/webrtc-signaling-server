@@ -3,6 +3,10 @@
 // Emits: hello(id), roster(peers[{id,role}]), peer-joined/peer-left
 // Forwards (rooms): offer/answer/candidate/bye/need-offer (adds {from}; honors {to})
 // Forwards (roomless): register(fp), relay({to:fp,...}), pair-init/pair-ack
+//
+// Also serves the admin API: /admin/login, /rooms (roster) and /admin/analytics/* (history, map).
+// Rooms live in memory only; join/leave events are recorded by activity-log.js (Postgres) when configured.
+// Env: PORT, WS_PATH, ALLOWED_ORIGINS, TRUST_PROXY_HOPS, MAX_* limits, ADMIN_* (see admin-auth.js).
 
 import express from 'express';
 import { WebSocketServer, WebSocket } from 'ws';
@@ -88,6 +92,7 @@ const rooms = new Map(); // roomId -> Set<ws>
 const fpClients = new Map(); // fingerprint -> ws
 const mailbox = new Map(); // fingerprint -> [pending messages]
 
+// Sends to a registered fingerprint, or queues the message in the bounded mailbox if it is offline.
 function deliverFp(toFp, obj) {
   const ws = fpClients.get(toFp);
   if (ws && ws.readyState === WebSocket.OPEN) {
@@ -140,6 +145,7 @@ app.get('/rooms', (req, res) => {
 // Admin-only room analytics: per room, time with a Camera AND a Viewer connected (from the activity history).
 //   GET /admin/analytics/rooms?from=ISO&to=ISO   (default: last 7 days; ?all=1 for all time)
 //   GET /admin/analytics/map?from=ISO&to=ISO     approximate locations of Cameras/Viewers (never IPs)
+// Parses ?from/&to/&all into {from, to} (from is null for all time); null if invalid or longer than 400 days.
 function analyticsRange(q) {
   const to = q.to ? new Date(String(q.to)) : new Date();
   if (q.all === '1') return isNaN(to) ? null : { from: null, to };
@@ -147,6 +153,7 @@ function analyticsRange(q) {
   if (isNaN(from) || isNaN(to) || from >= to || to - from > 400 * 86400_000) return null;
   return { from, to };
 }
+// Wraps an analytics handler with the admin auth check, range validation and error mapping (404/401/503/400).
 function analyticsRoute(handler) {
   return async (req, res) => {
     if (!adminAuth.enabled) return res.status(404).send('Not found');
@@ -193,15 +200,18 @@ const wss = new WebSocketServer({
   },
 });
 
+// Returns the peer set of a room, creating it if needed.
 function getRoomSet(roomId) {
   if (!rooms.has(roomId)) rooms.set(roomId, new Set());
   return rooms.get(roomId);
 }
+// Peer list ({id, role}) sent to clients in 'roster' messages.
 function roster(roomId) {
   const set = rooms.get(roomId);
   if (!set) return [];
   return [...set].map((s) => ({ id: s.id, role: s.role || 'receiver' }));
 }
+// Sends obj to every open peer in the room except `exclude`; returns how many were sent.
 function broadcast(roomId, obj, exclude) {
   const raw = JSON.stringify(obj);
   const set = rooms.get(roomId);
@@ -216,6 +226,7 @@ function broadcast(roomId, obj, exclude) {
   console.log(`[RELAY][broadcast] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} sent=${sent}`);
   return sent;
 }
+// Sends obj to one peer in the room; returns whether it was delivered.
 function sendTo(roomId, peerId, obj) {
   const set = rooms.get(roomId);
   if (!set) return false;
@@ -229,6 +240,7 @@ function sendTo(roomId, peerId, obj) {
   return false;
 }
 
+// One handler per socket: roomless fingerprint relay, then room join and in-room message forwarding.
 wss.on('connection', (ws, req) => {
   ws.id = randomUUID();
   ws.roomId = null;
@@ -387,6 +399,7 @@ wss.on('connection', (ws, req) => {
   });
 });
 
+// Heartbeat: terminate sockets that did not answer the previous ping (dead mobile connections).
 // heartbeat
 setInterval(() => {
   wss.clients.forEach((ws) => {

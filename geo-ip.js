@@ -24,12 +24,14 @@ const SCALE = 180; // degrees × 180 fits int16 (±32,400) with ~600 m precision
 const MEMORY_LIMIT_MB = Number(process.env.GEOIP_MEMORY_LIMIT_MB ?? 512);
 const MIN_FREE_MB = Number(process.env.GEOIP_MIN_FREE_MB ?? 220);
 
+// Download URL of the DB-IP monthly file for the date's UTC year and month.
 function monthUrl(d) {
   const y = d.getUTCFullYear(),
     m = String(d.getUTCMonth() + 1).padStart(2, '0');
   return `https://download.db-ip.com/free/dbip-city-lite-${y}-${m}.csv.gz`;
 }
 
+// Growable typed array: doubles when full, so millions of rows never sit in a plain JS array.
 class Grow {
   // growable typed array (no large JS arrays while streaming millions of rows)
   constructor(T, n = 1 << 18) {
@@ -51,14 +53,17 @@ class Grow {
     return r;
   }
 }
+// Dotted IPv4 -> uint32 (the leading >>> 0 keeps the top byte unsigned).
 const ip4 = (s) => {
   const p = s.split('.');
   return ((+p[0] << 24) >>> 0) + (+p[1] << 16) + (+p[2] << 8) + +p[3];
 };
+// First 32 bits of an IPv6 address (the first two groups), used as the lookup key.
 function ip6top32(s) {
   const head = s.split('::')[0].split(':');
   return (((parseInt(head[0] || '0', 16) & 0xffff) << 16) | (parseInt(head[1] || '0', 16) & 0xffff)) >>> 0;
 }
+// Binary search: index of the last range start <= x, or -1. Range ends are not checked.
 function find(arr, x) {
   let lo = 0,
     hi = arr.length - 1,
@@ -72,6 +77,7 @@ function find(arr, x) {
   }
   return r;
 }
+// Private, loopback, link-local and CGNAT ranges: never looked up.
 const PRIVATE_V4 =
   /^(10\.|127\.|0\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.)/;
 const PRIVATE_V6 = /^(f[cd]|fe[89ab]|::1$|::$)/i;
@@ -131,6 +137,10 @@ async function buildTables(gzStream) {
   return { v4: fin(v4), v6: fin(v6), countries };
 }
 
+/**
+ * Creates the lookup service. Tables load in the background, so lookup() returns null until `ready`.
+ * `fetchImpl` and `file` are injectable for tests.
+ */
 export function createGeoIp({
   enabled,
   file = process.env.GEOIP_FILE,
@@ -142,6 +152,7 @@ export function createGeoIp({
     loadedFrom = null,
     loading = null;
 
+  // Opens the local file or downloads the newest DB-IP file; returns null when that file is already loaded.
   async function openSource() {
     if (file) return { stream: fs.createReadStream(file, { highWaterMark: 1 << 16 }), from: file };
     const now = new Date();
@@ -159,6 +170,7 @@ export function createGeoIp({
     throw new Error('no DB-IP City Lite file available');
   }
 
+  // (Re)builds the tables; concurrent calls share one run, and the old tables are replaced only on success.
   async function load() {
     if (!enabled) return;
     if (loading) return loading;

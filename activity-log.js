@@ -56,6 +56,10 @@ export function clientIp(req, hops = 1) {
   return net.isIP(ip) ? ip : null;
 }
 
+/**
+ * Creates the activity log. Returns a no-op stub (enabled: false) when no database is configured.
+ * `poolFactory` lets tests inject a fake pg pool.
+ */
 export function createActivityLog({
   url = process.env.ACTIVITY_DATABASE_URL || process.env.DATABASE_URL,
   serverId = process.env.RENDER_INSTANCE_ID || 'local',
@@ -87,6 +91,7 @@ export function createActivityLog({
   const queue = []; // pending writes when the DB is slow/down
   let flushing = false;
 
+  // Creates the table once and closes rows left open by an earlier process; retried if the database was down.
   async function ensureSchema() {
     if (!ready)
       ready = (async () => {
@@ -105,6 +110,7 @@ export function createActivityLog({
     return ready;
   }
 
+  // Writes go through a bounded in-order queue so a slow database never blocks signalling (oldest dropped when full).
   function enqueue(job) {
     if (queue.length >= MAX_QUEUE) {
       queue.shift();
@@ -113,6 +119,7 @@ export function createActivityLog({
     queue.push(job);
     flush();
   }
+  // Single worker that drains the queue in order, retrying transient failures every 5 s.
   async function flush() {
     if (flushing) return;
     flushing = true;
@@ -139,6 +146,7 @@ export function createActivityLog({
     }
   }
 
+  // Records the start of a presence; `open` remembers its row id for the matching leave().
   function join({ connId, room, role, ip }) {
     const at = new Date();
     enqueue(async () => {
@@ -149,6 +157,7 @@ export function createActivityLog({
       open.set(connId, r.rows[0].id);
     });
   }
+  // Closes the presence row for this connection (timestamp taken now, written when the queue gets to it).
   function leave({ connId }) {
     const at = new Date();
     enqueue(async () => {

@@ -11,6 +11,10 @@ import pg from 'pg';
 
 const { Pool } = pg;
 
+/**
+ * Mounts the Postgres analytics routes under `opts.base` (default /a): POST /evt ingest, summary and metrics JSON,
+ * a small dashboard, and admin views. NOTE: server.js no longer imports this module (it answers /a with 410).
+ */
 export function mountAnalytics(app, opts = {}) {
   const base = opts.base ?? '/a';
   const ipSalt = opts.ipSalt ?? process.env.ANALYTICS_IP_SALT ?? 'rotate-me';
@@ -39,6 +43,7 @@ export function mountAnalytics(app, opts = {}) {
   });
 
   // Simple admin gate: either ?key=... OR Basic Auth using env vars
+  // Allows ?key=ANALYTICS_ADMIN_KEY or Basic auth (ADMIN_USER / ADMIN_PASS); denies everything if neither is set.
   function requireAdmin(req, res, next) {
     const qk = process.env.ANALYTICS_ADMIN_KEY;
     if (qk && req.query.key === qk) return next();
@@ -73,6 +78,7 @@ export function mountAnalytics(app, opts = {}) {
   });
 
   // Ensure schema and wait for it in routes
+  // Routes await this promise so early requests do not fail before the table exists.
   const ready = ensureSchema(pool)
     .then(() => {
       console.log('[analytics] schema ready');
@@ -631,6 +637,7 @@ export function mountAnalytics(app, opts = {}) {
 }
 
 // ---- Schema bootstrap ----
+// Creates the events table and its indexes if missing.
 async function ensureSchema(pool) {
   await pool.query(`
     CREATE TABLE IF NOT EXISTS events (
@@ -662,6 +669,7 @@ async function ensureSchema(pool) {
 }
 
 // ---- Helpers ----
+// JSON-encodes a value for the TEXT column, truncated to maxLen; null if it cannot be encoded.
 function safeJsonString(val, maxLen = 2000) {
   try {
     const s = typeof val === 'string' ? val : JSON.stringify(val);
@@ -671,6 +679,8 @@ function safeJsonString(val, maxLen = 2000) {
   }
 }
 
+// Best-guess client IP from proxy headers (Cloudflare, then X-Real-IP, then first X-Forwarded-For). Header values are
+// client-controllable unless a trusted proxy sets them.
 function getClientIp(req) {
   const cf = req.headers['cf-connecting-ip'];
   const xr = req.headers['x-real-ip'];
@@ -678,6 +688,7 @@ function getClientIp(req) {
   return (cf || xr || xff || req.ip || '').trim();
 }
 
+// Coarsens an address to its /24 (IPv4) or /64 (IPv6) network, for longer-term storage.
 function truncateIp(ip) {
   const ver = net.isIP(ip);
   if (ver === 4) {
@@ -693,6 +704,7 @@ function truncateIp(ip) {
   return '';
 }
 
+// Expands '::' shorthand to the full eight 4-digit groups.
 function expandIPv6(ip) {
   if (ip.includes('::')) {
     const [head, tail] = ip.split('::');
@@ -707,6 +719,7 @@ function expandIPv6(ip) {
     .join(':');
 }
 
+// Salted SHA-256 so the same visitor can be counted without keeping the address.
 function hashIp(ip, salt) {
   return crypto.createHash('sha256').update(`${salt}|${ip}`).digest('base64url');
 }

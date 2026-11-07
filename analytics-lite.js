@@ -3,6 +3,8 @@ import express from 'express';
 import crypto from 'node:crypto';
 import net from 'node:net';
 
+// In-memory variant of analytics-server.js (no Postgres): keeps the last maxEvents events and streams them over SSE.
+// Like analytics-server.js, it is not imported by server.js any more.
 export function mountAnalyticsLite(app, opts = {}) {
   const base = opts.base ?? '/a';
   const ipSalt = opts.ipSalt ?? 'rotate-me';
@@ -30,9 +32,11 @@ export function mountAnalyticsLite(app, opts = {}) {
   });
 
   // In-memory buffer of recent events
+  // Ring buffer of recent events, capped at MAX_EVENTS.
   const events = [];
   const sseClients = new Set(); // Set<ServerResponse>
 
+  // Stores the event and pushes it to every connected stream client.
   function pushEvent(row) {
     events.push(row);
     if (events.length > MAX_EVENTS) events.splice(0, events.length - MAX_EVENTS);
@@ -116,6 +120,7 @@ export function mountAnalyticsLite(app, opts = {}) {
 }
 
 // ---- Helpers copied from your existing file, but without PG ----
+// Best-guess client IP from proxy headers (client-controllable unless a trusted proxy sets them).
 function getClientIp(req) {
   const cf = req.headers['cf-connecting-ip'];
   const xr = req.headers['x-real-ip'];
@@ -123,6 +128,7 @@ function getClientIp(req) {
   return (cf || xr || xff || req.ip || '').trim();
 }
 
+// Coarsens an address to its /24 (IPv4) or /64 (IPv6) network.
 function truncateIp(ip) {
   const ver = net.isIP(ip);
   if (ver === 4) {
@@ -138,6 +144,7 @@ function truncateIp(ip) {
   return '';
 }
 
+// Expands '::' shorthand to the full eight 4-digit groups.
 function expandIPv6(ip) {
   if (ip.includes('::')) {
     const [head, tail] = ip.split('::');
@@ -152,6 +159,7 @@ function expandIPv6(ip) {
     .join(':');
 }
 
+// Salted SHA-256 of the address.
 function hashIp(ip, salt) {
   return crypto.createHash('sha256').update(`${salt}|${ip}`).digest('base64url');
 }

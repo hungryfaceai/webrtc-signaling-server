@@ -69,6 +69,7 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
   if (env.ADMIN_PASSWORD_HASH && !parsed)
     log.warn('[admin] ADMIN_PASSWORD_HASH is set but invalid — password sign-in disabled');
   const legacyKey = env.ADMIN_KEY || '';
+  // Session length in ms (ADMIN_SESSION_HOURS, default 8; the Math.max(5, ...) floor means at least 5 hours).
   const sessionMs = Math.max(5, Number(env.ADMIN_SESSION_HOURS) || 8) * 3600 * 1000;
   // Token signing key. Including the password hash means changing the password signs everyone out.
   const secret = createHash('sha256')
@@ -78,11 +79,13 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
   const enabled = !!parsed || !!legacyKey;
 
   // ---- sessions (stateless, signed) ----
+  // Token = base64url(payload).base64url(HMAC-SHA256(payload)); payload holds version, expiry and a random nonce.
   function issueToken() {
     const payload = b64u(JSON.stringify({ v: 1, exp: now() + sessionMs, n: b64u(randomBytes(9)) }));
     const sig = b64u(createHmac('sha256', secret).update(payload).digest());
     return { token: `${payload}.${sig}`, expiresAt: new Date(now() + sessionMs).toISOString() };
   }
+  // Verifies the signature in constant time first, then the version and expiry.
   function tokenValid(token) {
     const [payload, sig, extra] = String(token || '').split('.');
     if (!payload || !sig || extra !== undefined) return false;
@@ -96,6 +99,7 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
       return false;
     }
   }
+  // Constant-time comparison with the old static key (lengths are compared first, as timingSafeEqual requires).
   function legacyKeyValid(value) {
     if (!legacyKey) return false;
     const got = Buffer.from(String(value)),
@@ -113,6 +117,7 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
   // ---- brute-force limiting ----
   const PER_IP_FREE = 5; // free attempts before lockouts start
   const GLOBAL_PER_MIN = 30; // all clients together
+  // Per-IP failure counter. From the 5th failure the lockout doubles from 30 s up to 15 min.
   const failures = new Map(); // ip -> { count, lockedUntil, last }
   let globalWindow = { start: now(), count: 0 };
   function lockedFor(ip) {
@@ -141,6 +146,7 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
   let verifyChain = Promise.resolve(),
     queued = 0;
   const MAX_QUEUED = 10;
+  // Chains checks so only one scrypt runs at a time; a rejected check does not break the chain.
   function verifySerial(password) {
     const run = verifyChain.then(() => verifyPassword(password, parsed));
     verifyChain = run.catch(() => {});
@@ -173,6 +179,7 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
       res.set('Retry-After', '10');
       return res.status(429).json({ error: 'The server is busy. Try again in a few seconds.' });
     }
+    // Order of checks: per-IP lockout, global rate, in-flight allowance, queue cap, then the password itself.
     const password = req.body && typeof req.body.password === 'string' ? req.body.password : '';
     let ok = false;
     inFlight.set(ip, pending + 1);
