@@ -4,7 +4,7 @@ import crypto from 'node:crypto';
 import net from 'node:net';
 
 export function mountAnalyticsLite(app, opts = {}) {
-  const base   = opts.base   ?? '/a';
+  const base = opts.base ?? '/a';
   const ipSalt = opts.ipSalt ?? 'rotate-me';
   const MAX_EVENTS = opts.maxEvents ?? 20000;
 
@@ -12,7 +12,7 @@ export function mountAnalyticsLite(app, opts = {}) {
   app.set('trust proxy', true);
 
   // Optional CORS (same idea as your existing code)
-  const allowed = (opts.allowedOrigins ?? []).map(s => s.toLowerCase());
+  const allowed = (opts.allowedOrigins ?? []).map((s) => s.toLowerCase());
   if (allowed.length) {
     app.use(base, (req, res, next) => {
       const o = (req.headers.origin || '').toLowerCase();
@@ -24,14 +24,14 @@ export function mountAnalyticsLite(app, opts = {}) {
     });
   }
 
-  app.use(base, (_req, res, next) => { 
-    res.set('Cache-Control', 'no-store'); 
-    next(); 
+  app.use(base, (_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
   });
 
   // In-memory buffer of recent events
   const events = [];
-  const sseClients = new Set();  // Set<ServerResponse>
+  const sseClients = new Set(); // Set<ServerResponse>
 
   function pushEvent(row) {
     events.push(row);
@@ -39,7 +39,9 @@ export function mountAnalyticsLite(app, opts = {}) {
 
     const payload = `data:${JSON.stringify(row)}\n\n`;
     for (const res of sseClients) {
-      try { res.write(payload); } catch {}
+      try {
+        res.write(payload);
+      } catch {}
     }
   }
 
@@ -53,19 +55,19 @@ export function mountAnalyticsLite(app, opts = {}) {
 
     const row = {
       ts: ts.toISOString(),
-      app:      b.app      || 'app',
-      feature:  b.feature  || '',
-      page:     b.page     || '',
-      installId: String(b.installId).slice(0,128),
-      sessionId: String(b.sessionId).slice(0,128),
+      app: b.app || 'app',
+      feature: b.feature || '',
+      page: b.page || '',
+      installId: String(b.installId).slice(0, 128),
+      sessionId: String(b.sessionId).slice(0, 128),
       activeMs: Math.max(0, b.activeMs | 0),
-      kind:     b.t === 'ev' ? 'ev' : 'hb',
-      ev:       b.ev || null,
-      props:    b.props ?? null,
-      ip_full:  ip || null,
+      kind: b.t === 'ev' ? 'ev' : 'hb',
+      ev: b.ev || null,
+      props: b.props ?? null,
+      ip_full: ip || null,
       ip_trunc: ip ? truncateIp(ip) : null,
-      ip_hash:  ip ? hashIp(ip, ipSalt) : null,
-      ua: req.headers['user-agent']?.toString().slice(0,256) || null,
+      ip_hash: ip ? hashIp(ip, ipSalt) : null,
+      ua: req.headers['user-agent']?.toString().slice(0, 256) || null,
     };
 
     pushEvent(row);
@@ -77,7 +79,7 @@ export function mountAnalyticsLite(app, opts = {}) {
     res.writeHead(200, {
       'Content-Type': 'text/event-stream',
       'Cache-Control': 'no-cache',
-      'Connection': 'keep-alive',
+      Connection: 'keep-alive',
     });
 
     // Optional: send a comment to open the stream
@@ -115,8 +117,8 @@ export function mountAnalyticsLite(app, opts = {}) {
 
 // ---- Helpers copied from your existing file, but without PG ----
 function getClientIp(req) {
-  const cf  = req.headers['cf-connecting-ip'];
-  const xr  = req.headers['x-real-ip'];
+  const cf = req.headers['cf-connecting-ip'];
+  const xr = req.headers['x-real-ip'];
   const xff = (req.headers['x-forwarded-for'] || '').toString().split(',')[0]?.trim();
   return (cf || xr || xff || req.ip || '').trim();
 }
@@ -124,12 +126,14 @@ function getClientIp(req) {
 function truncateIp(ip) {
   const ver = net.isIP(ip);
   if (ver === 4) {
-    const p = ip.split('.'); p[3] = '0'; return p.join('.') + '/24';
+    const p = ip.split('.');
+    p[3] = '0';
+    return p.join('.') + '/24';
   }
   if (ver === 6) {
     const full = expandIPv6(ip);
     const parts = full.split(':');
-    return parts.slice(0,4).join(':') + '::/64';
+    return parts.slice(0, 4).join(':') + '::/64';
   }
   return '';
 }
@@ -140,9 +144,12 @@ function expandIPv6(ip) {
     const headParts = head ? head.split(':') : [];
     const tailParts = tail ? tail.split(':') : [];
     const zeros = new Array(8 - headParts.length - tailParts.length).fill('0');
-    return [...headParts, ...zeros, ...tailParts].map(h=>h.padStart(4,'0')).join(':');
+    return [...headParts, ...zeros, ...tailParts].map((h) => h.padStart(4, '0')).join(':');
   }
-  return ip.split(':').map(h=>h.padStart(4,'0')).join(':');
+  return ip
+    .split(':')
+    .map((h) => h.padStart(4, '0'))
+    .join(':');
 }
 
 function hashIp(ip, salt) {

@@ -5,14 +5,14 @@
 // Forwards (roomless): register(fp), relay({to:fp,...}), pair-init/pair-ack
 
 import express from 'express';
-import { WebSocketServer,  WebSocket } from 'ws';
+import { WebSocketServer, WebSocket } from 'ws';
 import { randomUUID } from 'crypto';
 import cors from 'cors';
 import { createAdminAuth } from './admin-auth.js';
 import { createActivityLog, clientIp } from './activity-log.js';
 import { createGeoIp } from './geo-ip.js';
 
-const PORT    = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3000;
 const WS_PATH = process.env.WS_PATH || '/ws';
 
 // Admin sign-in for /rooms (see admin-auth.js): ADMIN_PASSWORD_HASH on Render enables password
@@ -20,12 +20,12 @@ const WS_PATH = process.env.WS_PATH || '/ws';
 const adminAuth = createAdminAuth(process.env);
 
 // Abuse limits (overridable via env)
-const MAX_MSG_BYTES       = Number(process.env.MAX_MSG_BYTES)       || 64 * 1024; // SDP offers are ~2–10 KB
-const MAX_MAILBOX_PER_FP  = Number(process.env.MAX_MAILBOX_PER_FP)  || 50;
-const MAX_MAILBOX_FPS     = Number(process.env.MAX_MAILBOX_FPS)     || 1000;
-const MAILBOX_TTL_MS      = Number(process.env.MAILBOX_TTL_MS)      || 10 * 60 * 1000;
-const MAX_ROOM_PEERS      = Number(process.env.MAX_ROOM_PEERS)      || 16;
-const MAX_ID_LEN          = 256;   // room names, fingerprints, peer ids
+const MAX_MSG_BYTES = Number(process.env.MAX_MSG_BYTES) || 64 * 1024; // SDP offers are ~2–10 KB
+const MAX_MAILBOX_PER_FP = Number(process.env.MAX_MAILBOX_PER_FP) || 50;
+const MAX_MAILBOX_FPS = Number(process.env.MAX_MAILBOX_FPS) || 1000;
+const MAILBOX_TTL_MS = Number(process.env.MAILBOX_TTL_MS) || 10 * 60 * 1000;
+const MAX_ROOM_PEERS = Number(process.env.MAX_ROOM_PEERS) || 16;
+const MAX_ID_LEN = 256; // room names, fingerprints, peer ids
 
 const app = express();
 app.disable('x-powered-by');
@@ -47,8 +47,13 @@ app.set('etag', false); // no ETag → no 304 "not modified" short-cut for monit
 
 // Browser origins allowed to use this server (HTTP CORS and WebSocket handshake).
 // Native/non-browser clients send no Origin header and are still allowed.
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || 'https://hungryfaceai.github.io,http://localhost:3000,http://localhost:8000,capacitor://localhost')
-  .split(',').map(s => s.trim()).filter(Boolean);
+const ALLOWED_ORIGINS = (
+  process.env.ALLOWED_ORIGINS ||
+  'https://hungryfaceai.github.io,http://localhost:3000,http://localhost:8000,capacitor://localhost'
+)
+  .split(',')
+  .map((s) => s.trim())
+  .filter(Boolean);
 const originAllowed = (origin) => !origin || ALLOWED_ORIGINS.includes(origin);
 
 // Render puts exactly one proxy in front of the app. Trusting only that hop means req.ip is the
@@ -60,13 +65,15 @@ const TRUST_HOPS = Number(process.env.TRUST_PROXY_HOPS ?? 1);
 const activity = createActivityLog();
 // Approximate location of an IP (DB-IP City Lite, looked up locally; only if activity history is on).
 const geo = activity.enabled ? createGeoIp() : null;
-app.use(cors({
-  origin: (origin, cb) => cb(null, originAllowed(origin)),
-  methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-  maxAge: 86400,
-  credentials: false
-}));
+app.use(
+  cors({
+    origin: (origin, cb) => cb(null, originAllowed(origin)),
+    methods: ['GET', 'POST', 'OPTIONS'],
+    allowedHeaders: ['Content-Type', 'Authorization'],
+    maxAge: 86400,
+    credentials: false,
+  })
+);
 
 app.get('/', (_req, res) => res.send(`OK (WS at ${WS_PATH})`));
 
@@ -78,8 +85,8 @@ app.all(['/a', '/a/*'], (_req, res) => res.sendStatus(410)); // Gone — old cli
 const rooms = new Map(); // roomId -> Set<ws>
 
 // NEW: fingerprint routing + mailbox (roomless)
-const fpClients = new Map();      // fingerprint -> ws
-const mailbox   = new Map();      // fingerprint -> [pending messages]
+const fpClients = new Map(); // fingerprint -> ws
+const mailbox = new Map(); // fingerprint -> [pending messages]
 
 function deliverFp(toFp, obj) {
   const ws = fpClients.get(toFp);
@@ -117,7 +124,7 @@ setInterval(() => {
 app.post('/admin/login', express.json({ limit: '2kb' }), (req, res) => adminAuth.login(req, res));
 app.get('/admin/config', (_req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ password: adminAuth.passwordEnabled });   // whether the old static key is on is not public
+  res.json({ password: adminAuth.passwordEnabled }); // whether the old static key is on is not public
 });
 
 // Admin-only roster of active rooms (used by utils/rooms and utils/roster).
@@ -125,8 +132,8 @@ app.get('/rooms', (req, res) => {
   if (!adminAuth.enabled) return res.status(404).send('Not found');
   if (!adminAuth.authorized(req)) return res.status(401).send('Unauthorized');
   res.set('Cache-Control', 'no-store');
-  const json = Object.create(null);   // a room named "__proto__" must still be listed
-  for (const [room, set] of rooms) json[room] = [...set].map(ws => ({ id: ws.id, role: ws.role }));
+  const json = Object.create(null); // a room named "__proto__" must still be listed
+  for (const [room, set] of rooms) json[room] = [...set].map((ws) => ({ id: ws.id, role: ws.role }));
   res.json(json);
 });
 
@@ -148,17 +155,27 @@ function analyticsRoute(handler) {
     if (!activity.enabled) return res.status(503).json({ error: 'Activity history is not configured on the server.' });
     const range = analyticsRange(req.query);
     if (!range) return res.status(400).json({ error: 'Invalid date range.' });
-    try { res.json(await handler(range)); }
-    catch (e) { console.log('[activity] analytics failed:', e.message); res.status(503).json({ error: 'Activity history is temporarily unavailable.' }); }
+    try {
+      res.json(await handler(range));
+    } catch (e) {
+      console.log('[activity] analytics failed:', e.message);
+      res.status(503).json({ error: 'Activity history is temporarily unavailable.' });
+    }
   };
 }
-app.get('/admin/analytics/rooms', analyticsRoute(range => activity.roomAnalytics(range)));
-app.get('/admin/analytics/map', analyticsRoute(async range => ({
-  ...(await activity.connectionMap({ ...range, geo })),
-  geoReady: !!geo?.ready,
-  geoEnabled: !!geo?.enabled,
-  attribution: 'IP Geolocation by DB-IP (https://db-ip.com)',
-})));
+app.get(
+  '/admin/analytics/rooms',
+  analyticsRoute((range) => activity.roomAnalytics(range))
+);
+app.get(
+  '/admin/analytics/map',
+  analyticsRoute(async (range) => ({
+    ...(await activity.connectionMap({ ...range, geo })),
+    geoReady: !!geo?.ready,
+    geoEnabled: !!geo?.enabled,
+    attribution: 'IP Geolocation by DB-IP (https://db-ip.com)',
+  }))
+);
 
 const server = app.listen(PORT, () => {
   console.log(`HTTP :${PORT}  | WS path: ${WS_PATH}`);
@@ -183,7 +200,7 @@ function getRoomSet(roomId) {
 function roster(roomId) {
   const set = rooms.get(roomId);
   if (!set) return [];
-  return [...set].map(s => ({ id: s.id, role: s.role || 'receiver' }));
+  return [...set].map((s) => ({ id: s.id, role: s.role || 'receiver' }));
 }
 function broadcast(roomId, obj, exclude) {
   const raw = JSON.stringify(obj);
@@ -191,7 +208,10 @@ function broadcast(roomId, obj, exclude) {
   if (!set) return 0;
   let sent = 0;
   for (const s of set) {
-    if (s !== exclude && s.readyState === WebSocket.OPEN) { s.send(raw); sent++; }
+    if (s !== exclude && s.readyState === WebSocket.OPEN) {
+      s.send(raw);
+      sent++;
+    }
   }
   console.log(`[RELAY][broadcast] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} sent=${sent}`);
   return sent;
@@ -201,9 +221,9 @@ function sendTo(roomId, peerId, obj) {
   if (!set) return false;
   for (const s of set) {
     if (s.id === peerId && s.readyState === WebSocket.OPEN) {
-      s.send(JSON.stringify(obj)); 
+      s.send(JSON.stringify(obj));
       console.log(`[RELAY][direct] room=${roomId} type=${obj.type || obj.op} from=${obj.from || '-'} to=${peerId}`);
-      return true; 
+      return true;
     }
   }
   return false;
@@ -228,8 +248,12 @@ wss.on('connection', (ws, req) => {
 
   ws.on('message', (raw) => {
     let msg;
-    try { msg = JSON.parse(raw); } catch { return; }
-	  
+    try {
+      msg = JSON.parse(raw);
+    } catch {
+      return;
+    }
+
     // Accept both {type: "..."} and {op: "..."} messages
     const t = msg?.type || msg?.op;
 
@@ -239,23 +263,33 @@ wss.on('connection', (ws, req) => {
       // A fingerprint already held by another live connection can't be taken over (it would steal its messages).
       const holder = fpClients.get(msg.fp);
       if (holder && holder !== ws && holder.readyState === WebSocket.OPEN) {
-        try { ws.send(JSON.stringify({ type: 'error', reason: 'fp-in-use' })); } catch {}
+        try {
+          ws.send(JSON.stringify({ type: 'error', reason: 'fp-in-use' }));
+        } catch {}
         return;
       }
       // One fingerprint per connection: drop the previous one so the map can't grow without bound.
-      if (ws.fingerprint && ws.fingerprint !== msg.fp && fpClients.get(ws.fingerprint) === ws) fpClients.delete(ws.fingerprint);
+      if (ws.fingerprint && ws.fingerprint !== msg.fp && fpClients.get(ws.fingerprint) === ws)
+        fpClients.delete(ws.fingerprint);
       ws.fingerprint = msg.fp;
       fpClients.set(ws.fingerprint, ws);
       // flush mailbox
       const q = mailbox.get(ws.fingerprint) || [];
       mailbox.delete(ws.fingerprint);
-      for (const mm of q) try { ws.send(JSON.stringify(mm.msg)); } catch {}
+      for (const mm of q)
+        try {
+          ws.send(JSON.stringify(mm.msg));
+        } catch {}
       console.log(`[REGISTER] fp=${ws.fingerprint} id=${ws.id}`);
       return;
     }
     // 2) Pairing messages (relay by fingerprint)
     //if ((t === 'pair-init' || t === 'pair-ack') && typeof msg.to === 'string') {
-	if ((t === 'pair-init' || t === 'pair-ack' || t === 'pair-done') && typeof msg.to === 'string' && msg.to.length <= MAX_ID_LEN) {
+    if (
+      (t === 'pair-init' || t === 'pair-ack' || t === 'pair-done') &&
+      typeof msg.to === 'string' &&
+      msg.to.length <= MAX_ID_LEN
+    ) {
       deliverFp(msg.to, msg);
       return;
     }
@@ -266,7 +300,9 @@ wss.on('connection', (ws, req) => {
     }
     // (Optional keepalive passthrough)
     if (t === 'keepalive' || t === 'ping' || t === 'pong') {
-      try { ws.send(JSON.stringify({ type: 'pong' })); } catch {}
+      try {
+        ws.send(JSON.stringify({ type: 'pong' }));
+      } catch {}
       return;
     }
 
@@ -278,11 +314,12 @@ wss.on('connection', (ws, req) => {
       if (!nextRoom || nextRoom.length > MAX_ID_LEN || /[\u0000-\u001f\u007f]/.test(nextRoom)) return;
       if (nextRoom !== prevRoom && (rooms.get(nextRoom)?.size || 0) >= MAX_ROOM_PEERS) {
         console.log(`[JOIN] REJECT id=${ws.id} room=${nextRoom} (full)`);
-        try { ws.send(JSON.stringify({ type: 'error', reason: 'room-full' })); } catch {}
+        try {
+          ws.send(JSON.stringify({ type: 'error', reason: 'room-full' }));
+        } catch {}
         return;
       }
-    
-														   
+
       if (prevRoom && prevRoom !== nextRoom && rooms.has(prevRoom)) {
         activity.leave({ connId: ws.id });
         const prevSet = rooms.get(prevRoom);
@@ -294,16 +331,15 @@ wss.on('connection', (ws, req) => {
           broadcast(prevRoom, { type: 'roster', peers: roster(prevRoom) });
         }
       }
-    
+
       ws.roomId = nextRoom;
-      ws.role = (msg.role === 'sender') ? 'sender' : 'receiver';
-    
+      ws.role = msg.role === 'sender' ? 'sender' : 'receiver';
+
       const alreadyIn = rooms.get(nextRoom)?.has(ws);
       getRoomSet(nextRoom).add(ws);
       if (!alreadyIn) activity.join({ connId: ws.id, room: nextRoom, role: ws.role, ip: ws.ip });
       console.log(`[JOIN] id=${ws.id} role=${ws.role} room=${nextRoom} peers=${rooms.get(nextRoom).size}`);
-    
-																			
+
       broadcast(nextRoom, { type: 'peer-joined', id: ws.id, role: ws.role }, ws);
       const r = roster(nextRoom);
       broadcast(nextRoom, { type: 'roster', peers: r }, ws);
@@ -318,11 +354,11 @@ wss.on('connection', (ws, req) => {
     }
 
     // forward messages; add "from" within a room
-    if (['offer','answer','candidate','bye','need-offer','keepalive'].includes(t)) {
+    if (['offer', 'answer', 'candidate', 'bye', 'need-offer', 'keepalive'].includes(t)) {
       const payload = { ...msg, from: ws.id };
       let sent = 0;
       if (msg.to) sent = sendTo(ws.roomId, msg.to, payload) ? 1 : 0;
-      else        sent = broadcast(ws.roomId, payload, ws);
+      else sent = broadcast(ws.roomId, payload, ws);
       console.log(`[RELAY] room=${ws.roomId} type=${t} from=${ws.id} to=${msg.to || 'room'} sent=${sent}`);
       return;
     }
@@ -356,21 +392,27 @@ setInterval(() => {
   wss.clients.forEach((ws) => {
     if (!ws.isAlive) return ws.terminate();
     ws.isAlive = false;
-    try { ws.ping(); } catch {}
+    try {
+      ws.ping();
+    } catch {}
   });
 }, 30000);
 
 // Render stops the old instance on every deploy (SIGTERM): close open activity rows with the right time.
 let shuttingDown = false;
 async function shutdown(sig) {
-  if (shuttingDown) return; shuttingDown = true;
+  if (shuttingDown) return;
+  shuttingDown = true;
   console.log(`[${sig}] closing activity rows`);
-  const t = setTimeout(() => process.exit(0), 8000); t.unref?.();   // never hang a deploy
-  try { await activity.close(); } catch {}
+  const t = setTimeout(() => process.exit(0), 8000);
+  t.unref?.(); // never hang a deploy
+  try {
+    await activity.close();
+  } catch {}
   process.exit(0);
 }
 process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT',  () => shutdown('SIGINT'));
+process.on('SIGINT', () => shutdown('SIGINT'));
 
 process.on('unhandledRejection', (e) => console.error('[unhandledRejection]', e));
-process.on('uncaughtException',  (e) => console.error('[uncaughtException]', e));
+process.on('uncaughtException', (e) => console.error('[uncaughtException]', e));

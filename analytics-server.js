@@ -14,14 +14,14 @@ const { Pool } = pg;
 export function mountAnalytics(app, opts = {}) {
   const base = opts.base ?? '/a';
   const ipSalt = opts.ipSalt ?? process.env.ANALYTICS_IP_SALT ?? 'rotate-me';
-  const keepFullDays = opts.keepFullDays ?? 7;   // exact IP retention
-  const keepAllDays  = opts.keepAllDays  ?? 180; // row retention
+  const keepFullDays = opts.keepFullDays ?? 7; // exact IP retention
+  const keepAllDays = opts.keepAllDays ?? 180; // row retention
 
   // If your server sits behind a proxy (Render/Cloudflare/NGINX):
   app.set('trust proxy', true);
 
   // Optional CORS if your front-end is on a different origin (e.g., GitHub Pages)
-  const allowed = (opts.allowedOrigins ?? []).map(s => s.toLowerCase());
+  const allowed = (opts.allowedOrigins ?? []).map((s) => s.toLowerCase());
   if (allowed.length) {
     app.use(base, (req, res, next) => {
       const o = (req.headers.origin || '').toLowerCase();
@@ -33,13 +33,16 @@ export function mountAnalytics(app, opts = {}) {
     });
   }
 
-  app.use(base, (_req, res, next) => { res.set('Cache-Control','no-store'); next(); });
+  app.use(base, (_req, res, next) => {
+    res.set('Cache-Control', 'no-store');
+    next();
+  });
 
   // Simple admin gate: either ?key=... OR Basic Auth using env vars
   function requireAdmin(req, res, next) {
     const qk = process.env.ANALYTICS_ADMIN_KEY;
     if (qk && req.query.key === qk) return next();
-  
+
     const u = process.env.ADMIN_USER;
     const p = process.env.ADMIN_PASS;
     if (u && p) {
@@ -56,10 +59,7 @@ export function mountAnalytics(app, opts = {}) {
   }
 
   // ---- Postgres pool ----
-  const connectionString =
-    process.env.DATABASE_URL ||
-    process.env.POSTGRES_URL ||
-    process.env.PG_CONNECTION_STRING;
+  const connectionString = process.env.DATABASE_URL || process.env.POSTGRES_URL || process.env.PG_CONNECTION_STRING;
 
   if (!connectionString) {
     console.error('[analytics] No DATABASE_URL/POSTGRES_URL set');
@@ -73,12 +73,14 @@ export function mountAnalytics(app, opts = {}) {
   });
 
   // Ensure schema and wait for it in routes
-  const ready = ensureSchema(pool).then(() => {
-    console.log('[analytics] schema ready');
-  }).catch(err => {
-    console.error('[analytics] failed to ensure schema:', err);
-    throw err;
-  });
+  const ready = ensureSchema(pool)
+    .then(() => {
+      console.log('[analytics] schema ready');
+    })
+    .catch((err) => {
+      console.error('[analytics] failed to ensure schema:', err);
+      throw err;
+    });
 
   // ---- Ingest endpoint ----
   app.post(`${base}/evt`, express.json(), async (req, res) => {
@@ -91,21 +93,21 @@ export function mountAnalytics(app, opts = {}) {
       const ip = getClientIp(req);
 
       const row = {
-        ts:   new Date(+b.ts || Date.now()),
-        app:  b.app || 'app',
+        ts: new Date(+b.ts || Date.now()),
+        app: b.app || 'app',
         feature: b.feature || '',
         page: b.page || '',
-        installId: String(b.installId).slice(0,128),
-        sessionId: String(b.sessionId).slice(0,128),
-        activeMs: Math.max(0, +b.activeMs|0),
+        installId: String(b.installId).slice(0, 128),
+        sessionId: String(b.sessionId).slice(0, 128),
+        activeMs: Math.max(0, +b.activeMs | 0),
         kind: b.t === 'ev' ? 'ev' : 'hb',
-        ev:   b.ev || null,
+        ev: b.ev || null,
         // keep TEXT for props to avoid driver/json casting edge cases
         props: b.props ? safeJsonString(b.props, 2000) : null,
         ip_full: ip || null,
         ip_trunc: ip ? truncateIp(ip) : null,
         ip_hash: ip ? hashIp(ip, ipSalt) : null,
-        ua: req.headers['user-agent']?.toString().slice(0,256) || null,
+        ua: req.headers['user-agent']?.toString().slice(0, 256) || null,
       };
 
       // Insert should never break the client flow; log and return 204 on failure.
@@ -115,10 +117,20 @@ export function mountAnalytics(app, opts = {}) {
            (ts, app, feature, page, installId, sessionId, activeMs, kind, ev, props, ip_full, ip_trunc, ip_hash, ua)
            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)`,
           [
-            row.ts, row.app, row.feature, row.page,
-            row.installId, row.sessionId, row.activeMs,
-            row.kind, row.ev, row.props,
-            row.ip_full, row.ip_trunc, row.ip_hash, row.ua
+            row.ts,
+            row.app,
+            row.feature,
+            row.page,
+            row.installId,
+            row.sessionId,
+            row.activeMs,
+            row.kind,
+            row.ev,
+            row.props,
+            row.ip_full,
+            row.ip_trunc,
+            row.ip_hash,
+            row.ua,
           ]
         );
       } catch (e) {
@@ -139,43 +151,53 @@ export function mountAnalytics(app, opts = {}) {
       await ready;
 
       const days = Math.max(1, Math.min(180, +(req.query.days || 30)));
-      const since = new Date(Date.now() - days*86400*1000);
+      const since = new Date(Date.now() - days * 86400 * 1000);
 
-      const [{ n: dau }] = (await pool.query(
-        `SELECT COUNT(DISTINCT installId) AS n
+      const [{ n: dau }] = (
+        await pool.query(
+          `SELECT COUNT(DISTINCT installId) AS n
            FROM events WHERE ts >= NOW() - INTERVAL '1 day'`
-      )).rows;
+        )
+      ).rows;
 
-      const [{ n: wau }] = (await pool.query(
-        `SELECT COUNT(DISTINCT installId) AS n
+      const [{ n: wau }] = (
+        await pool.query(
+          `SELECT COUNT(DISTINCT installId) AS n
            FROM events WHERE ts >= NOW() - INTERVAL '7 days'`
-      )).rows;
+        )
+      ).rows;
 
-      const [{ n: mau }] = (await pool.query(
-        `SELECT COUNT(DISTINCT installId) AS n
+      const [{ n: mau }] = (
+        await pool.query(
+          `SELECT COUNT(DISTINCT installId) AS n
            FROM events WHERE ts >= NOW() - INTERVAL '30 days'`
-      )).rows;
+        )
+      ).rows;
 
-      const daily = (await pool.query(
-        `SELECT to_char(date_trunc('day', ts AT TIME ZONE 'Europe/London'), 'YYYY-MM-DD') AS day,
+      const daily = (
+        await pool.query(
+          `SELECT to_char(date_trunc('day', ts AT TIME ZONE 'Europe/London'), 'YYYY-MM-DD') AS day,
                 COUNT(DISTINCT installId) AS uniques
            FROM events
           WHERE ts >= $1
           GROUP BY 1
           ORDER BY 1 DESC`,
-        [since]
-      )).rows;
+          [since]
+        )
+      ).rows;
 
-      const [{ avgms }] = (await pool.query(
-        `WITH per_session AS (
+      const [{ avgms }] = (
+        await pool.query(
+          `WITH per_session AS (
            SELECT sessionId, MAX(activeMs) AS mx
              FROM events
             WHERE ts >= $1
             GROUP BY sessionId
          )
          SELECT AVG(mx)::float AS avgms FROM per_session`,
-        [since]
-      )).rows;
+          [since]
+        )
+      ).rows;
 
       return res.json({
         days,
@@ -183,7 +205,7 @@ export function mountAnalytics(app, opts = {}) {
         wau: Number(wau) || 0,
         mau: Number(mau) || 0,
         avgSessionSeconds: Math.round((avgms || 0) / 1000),
-        daily
+        daily,
       });
     } catch (e) {
       console.error('[analytics] summary failed:', e);
@@ -196,33 +218,40 @@ export function mountAnalytics(app, opts = {}) {
     try {
       await ready;
 
-      const [{ n_live }] = (await pool.query(
-        `SELECT COUNT(DISTINCT installId) AS n_live
+      const [{ n_live }] = (
+        await pool.query(
+          `SELECT COUNT(DISTINCT installId) AS n_live
            FROM events
           WHERE ts >= NOW() - INTERVAL '2 minutes'`
-      )).rows;
-  
-      const topFeatures7d = (await pool.query(
-        `SELECT feature, COUNT(DISTINCT installId) AS uniques
+        )
+      ).rows;
+
+      const topFeatures7d = (
+        await pool.query(
+          `SELECT feature, COUNT(DISTINCT installId) AS uniques
            FROM events
           WHERE ts >= NOW() - INTERVAL '7 days'
           GROUP BY feature
           ORDER BY uniques DESC
           LIMIT 10`
-      )).rows;
-  
-      const topEvents7d = (await pool.query(
-        `SELECT ev, COUNT(*) AS n
+        )
+      ).rows;
+
+      const topEvents7d = (
+        await pool.query(
+          `SELECT ev, COUNT(*) AS n
            FROM events
           WHERE kind = 'ev'
             AND ts >= NOW() - INTERVAL '7 days'
           GROUP BY ev
           ORDER BY n DESC
           LIMIT 10`
-      )).rows;
-  
-      const pairing7d = (await pool.query(
-        `WITH base AS (
+        )
+      ).rows;
+
+      const pairing7d = (
+        await pool.query(
+          `WITH base AS (
            SELECT installId, sessionId, ev
              FROM events
             WHERE kind='ev'
@@ -234,10 +263,12 @@ export function mountAnalytics(app, opts = {}) {
            (SELECT COUNT(*) FROM (SELECT DISTINCT installId, sessionId FROM base WHERE ev='pair-init') x) AS init,
            (SELECT COUNT(*) FROM (SELECT DISTINCT installId, sessionId FROM base WHERE ev='pair-ack') x) AS ack,
            (SELECT COUNT(*) FROM (SELECT DISTINCT installId, sessionId FROM base WHERE ev='pair-done') x) AS done`
-      )).rows[0] || { init: 0, ack: 0, done: 0 };
-  
-      const errors7d = (await pool.query(
-        `SELECT ev, COUNT(*) AS n
+        )
+      ).rows[0] || { init: 0, ack: 0, done: 0 };
+
+      const errors7d = (
+        await pool.query(
+          `SELECT ev, COUNT(*) AS n
            FROM events
           WHERE kind='ev'
             AND ts >= NOW() - INTERVAL '7 days'
@@ -245,24 +276,27 @@ export function mountAnalytics(app, opts = {}) {
           GROUP BY ev
           ORDER BY n DESC
           LIMIT 10`
-      )).rows;
-  
-      const daily30 = (await pool.query(
-        `SELECT to_char(date_trunc('day', ts AT TIME ZONE 'Europe/London'), 'YYYY-MM-DD') AS day,
+        )
+      ).rows;
+
+      const daily30 = (
+        await pool.query(
+          `SELECT to_char(date_trunc('day', ts AT TIME ZONE 'Europe/London'), 'YYYY-MM-DD') AS day,
                 COUNT(DISTINCT installId) AS uniques
            FROM events
           WHERE ts >= NOW() - INTERVAL '30 days'
           GROUP BY 1
           ORDER BY 1 DESC`
-      )).rows;
-  
+        )
+      ).rows;
+
       return res.json({
         live: Number(n_live) || 0,
         topFeatures7d,
         topEvents7d,
         pairing7d,
         errors7d,
-        daily30
+        daily30,
       });
     } catch (e) {
       console.error('[analytics] metrics failed:', e);
@@ -356,19 +390,19 @@ export function mountAnalytics(app, opts = {}) {
     try {
       await ready;
 
-      const days  = Math.min(180, Math.max(1, +(req.query.days || 7)));
+      const days = Math.min(180, Math.max(1, +(req.query.days || 7)));
       const limit = Math.min(2000, Math.max(1, +(req.query.limit || 200)));
       const feature = (req.query.feature || '').toString().trim();
       const allowFull = req.query.full === '1'; // show ip_full only if admin requests it
-  
+
       const params = [days, limit];
-      const where  = [`ts >= NOW() - ($1 || ' days')::interval`];
+      const where = [`ts >= NOW() - ($1 || ' days')::interval`];
       if (feature) {
         // case-insensitive substring match; escape %/_ so they are literals
         const pattern = '%' + feature.replace(/[%_]/g, '\\$&') + '%';
         where.push(`COALESCE(feature,'') ILIKE $3 ESCAPE '\\'`);
         params.push(pattern);
-      } 
+      }
       const sql = `
         SELECT ts, app, feature, page, installId, sessionId, activeMs, kind, ev,
                ip_full, ip_trunc, ip_hash, ua
@@ -378,7 +412,7 @@ export function mountAnalytics(app, opts = {}) {
          LIMIT $2
       `;
       const rows = (await pool.query(sql, params)).rows;
-  
+
       // Only include ip_full if explicitly requested (and you may still redact)
       if (!allowFull) {
         for (const r of rows) r.ip_full = null;
@@ -395,19 +429,19 @@ export function mountAnalytics(app, opts = {}) {
     try {
       await ready;
 
-      const days  = Math.min(180, Math.max(1, +(req.query.days || 30)));
+      const days = Math.min(180, Math.max(1, +(req.query.days || 30)));
       const limit = Math.min(1000, Math.max(1, +(req.query.limit || 200)));
       const feature = (req.query.feature || '').toString().trim();
-  
+
       const params = [days, limit];
-      const where  = [`ts >= NOW() - ($1 || ' days')::interval`];
+      const where = [`ts >= NOW() - ($1 || ' days')::interval`];
       if (feature) {
         // case-insensitive substring match; escape %/_ so they are literals
         const pattern = '%' + feature.replace(/[%_]/g, '\\$&') + '%';
         where.push(`COALESCE(feature,'') ILIKE $3 ESCAPE '\\'`);
         params.push(pattern);
-}
-  
+      }
+
       const sql = `
         WITH sess AS (
           SELECT installId, sessionId,
@@ -632,12 +666,14 @@ function safeJsonString(val, maxLen = 2000) {
   try {
     const s = typeof val === 'string' ? val : JSON.stringify(val);
     return s.length > maxLen ? s.slice(0, maxLen) : s;
-  } catch { return null; }
+  } catch {
+    return null;
+  }
 }
 
 function getClientIp(req) {
-  const cf  = req.headers['cf-connecting-ip'];
-  const xr  = req.headers['x-real-ip'];
+  const cf = req.headers['cf-connecting-ip'];
+  const xr = req.headers['x-real-ip'];
   const xff = (req.headers['x-forwarded-for'] || '').toString().split(',')[0]?.trim();
   return (cf || xr || xff || req.ip || '').trim();
 }
@@ -645,12 +681,14 @@ function getClientIp(req) {
 function truncateIp(ip) {
   const ver = net.isIP(ip);
   if (ver === 4) {
-    const p = ip.split('.'); p[3] = '0'; return p.join('.') + '/24';
+    const p = ip.split('.');
+    p[3] = '0';
+    return p.join('.') + '/24';
   }
   if (ver === 6) {
     const full = expandIPv6(ip);
     const parts = full.split(':'); // 8 hextets
-    return parts.slice(0,4).join(':') + '::/64';
+    return parts.slice(0, 4).join(':') + '::/64';
   }
   return '';
 }
@@ -661,9 +699,12 @@ function expandIPv6(ip) {
     const headParts = head ? head.split(':') : [];
     const tailParts = tail ? tail.split(':') : [];
     const zeros = new Array(8 - headParts.length - tailParts.length).fill('0');
-    return [...headParts, ...zeros, ...tailParts].map(h=>h.padStart(4,'0')).join(':');
+    return [...headParts, ...zeros, ...tailParts].map((h) => h.padStart(4, '0')).join(':');
   }
-  return ip.split(':').map(h=>h.padStart(4,'0')).join(':');
+  return ip
+    .split(':')
+    .map((h) => h.padStart(4, '0'))
+    .join(':');
 }
 
 function hashIp(ip, salt) {

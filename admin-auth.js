@@ -24,7 +24,8 @@ const unb64u = (s) => Buffer.from(String(s), 'base64url');
 
 function scrypt(password, salt, { N, r, p, keyLen }) {
   return new Promise((resolve, reject) =>
-    _scrypt(password, salt, keyLen, { N, r, p, maxmem: MAXMEM }, (err, key) => (err ? reject(err) : resolve(key))));
+    _scrypt(password, salt, keyLen, { N, r, p, maxmem: MAXMEM }, (err, key) => (err ? reject(err) : resolve(key)))
+  );
 }
 
 /** Create a storable hash for a password (used by hash-password.js). */
@@ -37,7 +38,9 @@ export async function hashPassword(password, params = SCRYPT) {
 
 /** Parse and sanity-check a stored hash. Returns null if it isn't one of ours. */
 export function parseHash(stored) {
-  const parts = String(stored || '').trim().split('$');
+  const parts = String(stored || '')
+    .trim()
+    .split('$');
   if (parts.length !== 6 || parts[0] !== 'scrypt') return null;
   const [, N, r, p, salt, key] = parts;
   const params = { N: Number(N), r: Number(r), p: Number(p), keyLen: unb64u(key).length };
@@ -63,7 +66,8 @@ export async function verifyPassword(password, parsed) {
  */
 export function createAdminAuth(env = process.env, { now = () => Date.now(), log = console } = {}) {
   const parsed = parseHash(env.ADMIN_PASSWORD_HASH);
-  if (env.ADMIN_PASSWORD_HASH && !parsed) log.warn('[admin] ADMIN_PASSWORD_HASH is set but invalid — password sign-in disabled');
+  if (env.ADMIN_PASSWORD_HASH && !parsed)
+    log.warn('[admin] ADMIN_PASSWORD_HASH is set but invalid — password sign-in disabled');
   const legacyKey = env.ADMIN_KEY || '';
   const sessionMs = Math.max(5, Number(env.ADMIN_SESSION_HOURS) || 8) * 3600 * 1000;
   // Token signing key. Including the password hash means changing the password signs everyone out.
@@ -85,12 +89,17 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
     const want = createHmac('sha256', secret).update(payload).digest();
     const got = unb64u(sig);
     if (got.length !== want.length || !timingSafeEqual(got, want)) return false;
-    try { const { v, exp } = JSON.parse(unb64u(payload).toString('utf8')); return v === 1 && Number(exp) > now(); }
-    catch { return false; }
+    try {
+      const { v, exp } = JSON.parse(unb64u(payload).toString('utf8'));
+      return v === 1 && Number(exp) > now();
+    } catch {
+      return false;
+    }
   }
   function legacyKeyValid(value) {
     if (!legacyKey) return false;
-    const got = Buffer.from(String(value)), want = Buffer.from(legacyKey);
+    const got = Buffer.from(String(value)),
+      want = Buffer.from(legacyKey);
     return got.length === want.length && timingSafeEqual(got, want);
   }
   /** True if the request carries a valid session token (or, during the switch-over, the old key). */
@@ -102,9 +111,9 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
   }
 
   // ---- brute-force limiting ----
-  const PER_IP_FREE = 5;          // free attempts before lockouts start
-  const GLOBAL_PER_MIN = 30;      // all clients together
-  const failures = new Map();     // ip -> { count, lockedUntil, last }
+  const PER_IP_FREE = 5; // free attempts before lockouts start
+  const GLOBAL_PER_MIN = 30; // all clients together
+  const failures = new Map(); // ip -> { count, lockedUntil, last }
   let globalWindow = { start: now(), count: 0 };
   function lockedFor(ip) {
     const f = failures.get(ip);
@@ -112,7 +121,8 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
   }
   function recordFailure(ip) {
     const f = failures.get(ip) || { count: 0, lockedUntil: 0, last: 0 };
-    f.count += 1; f.last = now();
+    f.count += 1;
+    f.last = now();
     if (f.count >= PER_IP_FREE) f.lockedUntil = now() + Math.min(15 * 60, 2 ** (f.count - PER_IP_FREE) * 30) * 1000;
     failures.set(ip, f);
     if (failures.size > 10000) failures.delete(failures.keys().next().value);
@@ -121,18 +131,22 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
     if (now() - globalWindow.start > 60000) globalWindow = { start: now(), count: 0 };
     return ++globalWindow.count <= GLOBAL_PER_MIN;
   }
-  setInterval(() => { const cut = now() - 3600 * 1000; for (const [ip, f] of failures) if (f.last < cut && f.lockedUntil < now()) failures.delete(ip); }, 600000).unref?.();
+  setInterval(() => {
+    const cut = now() - 3600 * 1000;
+    for (const [ip, f] of failures) if (f.last < cut && f.lockedUntil < now()) failures.delete(ip);
+  }, 600000).unref?.();
 
   // One password check at a time: each scrypt run needs ~128 MiB, so parallel attempts could exhaust
   // the server's memory. Attempts queue behind each other (and the queue is capped).
-  let verifyChain = Promise.resolve(), queued = 0;
+  let verifyChain = Promise.resolve(),
+    queued = 0;
   const MAX_QUEUED = 10;
   function verifySerial(password) {
     const run = verifyChain.then(() => verifyPassword(password, parsed));
     verifyChain = run.catch(() => {});
     return run;
   }
-  const inFlight = new Map();   // ip -> attempts not yet decided
+  const inFlight = new Map(); // ip -> attempts not yet decided
 
   /** Express handler for POST /admin/login */
   async function login(req, res) {
@@ -140,24 +154,42 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
     if (!parsed) return res.status(404).json({ error: 'Password sign-in is not configured.' });
     const ip = req.ip || 'unknown';
     const wait = lockedFor(ip);
-    if (wait) { res.set('Retry-After', String(wait)); return res.status(429).json({ error: `Too many attempts. Try again in ${wait} s.` }); }
-    if (!globalAllowed()) { res.set('Retry-After', '60'); return res.status(429).json({ error: 'Too many sign-in attempts. Try again in a minute.' }); }
+    if (wait) {
+      res.set('Retry-After', String(wait));
+      return res.status(429).json({ error: `Too many attempts. Try again in ${wait} s.` });
+    }
+    if (!globalAllowed()) {
+      res.set('Retry-After', '60');
+      return res.status(429).json({ error: 'Too many sign-in attempts. Try again in a minute.' });
+    }
     // Attempts still being checked count against the free allowance, so a burst can't slip past the lockout.
     const pending = inFlight.get(ip) || 0;
     const f = failures.get(ip);
-    if ((f ? f.count : 0) + pending >= PER_IP_FREE) { res.set('Retry-After', '30'); return res.status(429).json({ error: 'Too many attempts. Try again in 30 s.' }); }
-    if (queued >= MAX_QUEUED) { res.set('Retry-After', '10'); return res.status(429).json({ error: 'The server is busy. Try again in a few seconds.' }); }
+    if ((f ? f.count : 0) + pending >= PER_IP_FREE) {
+      res.set('Retry-After', '30');
+      return res.status(429).json({ error: 'Too many attempts. Try again in 30 s.' });
+    }
+    if (queued >= MAX_QUEUED) {
+      res.set('Retry-After', '10');
+      return res.status(429).json({ error: 'The server is busy. Try again in a few seconds.' });
+    }
     const password = req.body && typeof req.body.password === 'string' ? req.body.password : '';
     let ok = false;
-    inFlight.set(ip, pending + 1); queued++;
-    try { ok = await verifySerial(password); } catch (e) { log.warn('[admin] verify error', e?.message || e); }
-    finally {
+    inFlight.set(ip, pending + 1);
+    queued++;
+    try {
+      ok = await verifySerial(password);
+    } catch (e) {
+      log.warn('[admin] verify error', e?.message || e);
+    } finally {
       queued--;
-      const n = (inFlight.get(ip) || 1) - 1; if (n > 0) inFlight.set(ip, n); else inFlight.delete(ip);
+      const n = (inFlight.get(ip) || 1) - 1;
+      if (n > 0) inFlight.set(ip, n);
+      else inFlight.delete(ip);
     }
     if (!ok) {
       recordFailure(ip);
-      log.log(`[admin] sign-in FAILED ip=${ip}`);           // never log the password
+      log.log(`[admin] sign-in FAILED ip=${ip}`); // never log the password
       return res.status(401).json({ error: 'Wrong password.' });
     }
     failures.delete(ip);

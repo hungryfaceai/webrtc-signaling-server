@@ -45,7 +45,10 @@ const MAX_QUEUE = 5000;
 /** Client IP: Render adds the real address to X-Forwarded-For; trust exactly `hops` proxies (can't be spoofed). */
 export function clientIp(req, hops = 1) {
   const remote = (req.socket?.remoteAddress || '').replace(/^::ffff:/, '');
-  const xff = String(req.headers?.['x-forwarded-for'] || '').split(',').map(s => s.trim()).filter(Boolean);
+  const xff = String(req.headers?.['x-forwarded-for'] || '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean);
   // chain = [client, proxy1, ..., remote]; the address `hops` steps back from the remote is trusted
   const chain = [...xff, remote];
   const pick = chain[Math.max(0, chain.length - 1 - hops)] || remote;
@@ -53,42 +56,60 @@ export function clientIp(req, hops = 1) {
   return net.isIP(ip) ? ip : null;
 }
 
-export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || process.env.DATABASE_URL, serverId = process.env.RENDER_INSTANCE_ID || 'local',
-                                    retentionDays = Number(process.env.ACTIVITY_RETENTION_DAYS ?? 395), poolFactory } = {}) {
+export function createActivityLog({
+  url = process.env.ACTIVITY_DATABASE_URL || process.env.DATABASE_URL,
+  serverId = process.env.RENDER_INSTANCE_ID || 'local',
+  retentionDays = Number(process.env.ACTIVITY_RETENTION_DAYS ?? 395),
+  poolFactory,
+} = {}) {
   if (!url && !poolFactory) {
     console.log('[activity] disabled (no ACTIVITY_DATABASE_URL)');
     const noop = () => {};
-    const off = async () => { throw new Error('activity log disabled'); };
+    const off = async () => {
+      throw new Error('activity log disabled');
+    };
     return { enabled: false, join: noop, leave: noop, roomAnalytics: off, connectionMap: off, close: async () => {} };
   }
 
-  const pool = poolFactory ? poolFactory() : new Pool({
-    connectionString: url,
-    max: 3,
-    idleTimeoutMillis: 30_000,
-    connectionTimeoutMillis: 10_000,
-    ssl: /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: false },   // Supabase requires TLS
-  });
-  pool.on?.('error', e => console.log('[activity] pool error:', e.message));
+  const pool = poolFactory
+    ? poolFactory()
+    : new Pool({
+        connectionString: url,
+        max: 3,
+        idleTimeoutMillis: 30_000,
+        connectionTimeoutMillis: 10_000,
+        ssl: /localhost|127\.0\.0\.1/.test(url) ? false : { rejectUnauthorized: false }, // Supabase requires TLS
+      });
+  pool.on?.('error', (e) => console.log('[activity] pool error:', e.message));
 
-  let ready = null;           // schema promise
-  const open = new Map();     // conn_id -> row id (for the matching "leave")
-  const queue = [];           // pending writes when the DB is slow/down
+  let ready = null; // schema promise
+  const open = new Map(); // conn_id -> row id (for the matching "leave")
+  const queue = []; // pending writes when the DB is slow/down
   let flushing = false;
 
   async function ensureSchema() {
-    if (!ready) ready = (async () => {
-      await pool.query(SCHEMA);
-      // Rows left open by a previous server process (crash/redeploy) can never be closed by it: close them now.
-      const r = await pool.query(`update room_presence set left_at = now() where left_at is null and (server_id is distinct from $1)`, [serverId]);
-      if (r.rowCount) console.log(`[activity] closed ${r.rowCount} stale presence row(s) from a previous run`);
-      console.log('[activity] ready');
-    })().catch(e => { ready = null; throw e; });
+    if (!ready)
+      ready = (async () => {
+        await pool.query(SCHEMA);
+        // Rows left open by a previous server process (crash/redeploy) can never be closed by it: close them now.
+        const r = await pool.query(
+          `update room_presence set left_at = now() where left_at is null and (server_id is distinct from $1)`,
+          [serverId]
+        );
+        if (r.rowCount) console.log(`[activity] closed ${r.rowCount} stale presence row(s) from a previous run`);
+        console.log('[activity] ready');
+      })().catch((e) => {
+        ready = null;
+        throw e;
+      });
     return ready;
   }
 
   function enqueue(job) {
-    if (queue.length >= MAX_QUEUE) { queue.shift(); console.log('[activity] queue full, dropped oldest event'); }
+    if (queue.length >= MAX_QUEUE) {
+      queue.shift();
+      console.log('[activity] queue full, dropped oldest event');
+    }
     queue.push(job);
     flush();
   }
@@ -97,15 +118,25 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
     flushing = true;
     try {
       while (queue.length) {
-        try { await ensureSchema(); await queue[0](); queue.shift(); }
-        catch (e) {
+        try {
+          await ensureSchema();
+          await queue[0]();
+          queue.shift();
+        } catch (e) {
           // Data/constraint errors (Postgres classes 22 and 23) will fail forever: drop that event so it
           // can't block every write behind it. Anything else (connection, timeout) is retried.
-          if (/^2[23]/.test(String(e && e.code || ''))) { console.log('[activity] dropped an event the database rejected:', e.message); queue.shift(); continue; }
-          console.log('[activity] write failed, will retry:', e.message); await new Promise(r => setTimeout(r, 5000));
+          if (/^2[23]/.test(String((e && e.code) || ''))) {
+            console.log('[activity] dropped an event the database rejected:', e.message);
+            queue.shift();
+            continue;
+          }
+          console.log('[activity] write failed, will retry:', e.message);
+          await new Promise((r) => setTimeout(r, 5000));
         }
       }
-    } finally { flushing = false; }
+    } finally {
+      flushing = false;
+    }
   }
 
   function join({ connId, room, role, ip }) {
@@ -113,7 +144,8 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
     enqueue(async () => {
       const r = await pool.query(
         `insert into room_presence (room, role, conn_id, ip, joined_at, server_id) values ($1,$2,$3,$4,$5,$6) returning id`,
-        [room, role === 'sender' ? 'sender' : 'receiver', connId, ip || null, at, serverId]);
+        [room, role === 'sender' ? 'sender' : 'receiver', connId, ip || null, at, serverId]
+      );
       open.set(connId, r.rows[0].id);
     });
   }
@@ -130,12 +162,17 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
   // Daily clean-up of old rows (retention).
   let pruneTimer = null;
   if (retentionDays > 0) {
-    const prune = () => enqueue(async () => {
-      const r = await pool.query(`delete from room_presence where coalesce(left_at, joined_at) < now() - make_interval(days => $1)`, [retentionDays]);
-      if (r.rowCount) console.log(`[activity] pruned ${r.rowCount} row(s) older than ${retentionDays} days`);
-    });
+    const prune = () =>
+      enqueue(async () => {
+        const r = await pool.query(
+          `delete from room_presence where coalesce(left_at, joined_at) < now() - make_interval(days => $1)`,
+          [retentionDays]
+        );
+        if (r.rowCount) console.log(`[activity] pruned ${r.rowCount} row(s) older than ${retentionDays} days`);
+      });
     setTimeout(prune, 60_000).unref?.();
-    pruneTimer = setInterval(prune, 24 * 3600_000); pruneTimer.unref?.();
+    pruneTimer = setInterval(prune, 24 * 3600_000);
+    pruneTimer.unref?.();
   }
 
   // Short gaps (a phone locking its screen, Wi-Fi hopping) are part of the same session.
@@ -188,8 +225,11 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
    */
   async function roomAnalytics({ from, to }) {
     await ensureSchema();
-    const start = from || (await pool.query('select coalesce(min(joined_at), now()) as m from room_presence')).rows[0].m;
-    const sql = SESSIONS_SQL + `
+    const start =
+      from || (await pool.query('select coalesce(min(joined_at), now()) as m from room_presence')).rows[0].m;
+    const sql =
+      SESSIONS_SQL +
+      `
       select room,
              count(*)::int                                   as sessions,
              coalesce(sum(active_s), 0)::float8              as total_s,
@@ -200,13 +240,20 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
     const live = await pool.query(`
       select room from room_presence where left_at is null
       group by room having bool_or(role = 'sender') and bool_or(role = 'receiver')`);
-    const activeNow = new Set(live.rows.map(x => x.room));
+    const activeNow = new Set(live.rows.map((x) => x.room));
     return {
-      from: new Date(start).toISOString(), to: new Date(to).toISOString(), allTime: !from, sessionGapSeconds: sessionGapS,
-      rooms: r.rows.map(x => ({
-        room: x.room, sessions: x.sessions, totalSeconds: Math.round(x.total_s),
-        avgSeconds: x.sessions ? Math.round(x.total_s / x.sessions) : 0, longestSeconds: Math.round(x.longest_s),
-        lastActive: x.last_active ? new Date(x.last_active).toISOString() : null, activeNow: activeNow.has(x.room),
+      from: new Date(start).toISOString(),
+      to: new Date(to).toISOString(),
+      allTime: !from,
+      sessionGapSeconds: sessionGapS,
+      rooms: r.rows.map((x) => ({
+        room: x.room,
+        sessions: x.sessions,
+        totalSeconds: Math.round(x.total_s),
+        avgSeconds: x.sessions ? Math.round(x.total_s / x.sessions) : 0,
+        longestSeconds: Math.round(x.longest_s),
+        lastActive: x.last_active ? new Date(x.last_active).toISOString() : null,
+        activeNow: activeNow.has(x.room),
       })),
     };
   }
@@ -218,8 +265,11 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
    */
   async function connectionMap({ from, to, geo }) {
     await ensureSchema();
-    const start = from || (await pool.query('select coalesce(min(joined_at), now()) as m from room_presence')).rows[0].m;
-    const sql = SESSIONS_SQL + `,
+    const start =
+      from || (await pool.query('select coalesce(min(joined_at), now()) as m from room_presence')).rows[0].m;
+    const sql =
+      SESSIONS_SQL +
+      `,
       parts as (                                    -- devices present during a session of their room
         select distinct p.room, p.role, p.ip, p.open
         from p join sessions s on s.room = p.room and p.s < s.ended and p.e > s.started
@@ -230,12 +280,13 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
     const live = await pool.query(`
       select room from room_presence where left_at is null
       group by room having bool_or(role = 'sender') and bool_or(role = 'receiver')`);
-    const activeNow = new Set(live.rows.map(x => x.room));
+    const activeNow = new Set(live.rows.map((x) => x.room));
     const rooms = new Map();
     // Every room connected right now is listed, even if none of its devices has a usable IP address.
     for (const room of activeNow) rooms.set(room, { room, activeNow: true, cameras: [], viewers: [] });
     for (const x of r.rows) {
-      if (!rooms.has(x.room)) rooms.set(x.room, { room: x.room, activeNow: activeNow.has(x.room), cameras: [], viewers: [] });
+      if (!rooms.has(x.room))
+        rooms.set(x.room, { room: x.room, activeNow: activeNow.has(x.room), cameras: [], viewers: [] });
       const loc = geo ? geo.lookup(x.ip) : null;
       // An active room only shows the devices connected right now; a past one shows everyone who took part.
       const entry = rooms.get(x.room);
@@ -243,21 +294,44 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
       if (!loc) continue;
       (x.role === 'sender' ? entry.cameras : entry.viewers).push(loc);
     }
-    const dedupe = list => [...new Map(list.map(l => [l.lat + ',' + l.lon, l])).values()];
+    const dedupe = (list) => [...new Map(list.map((l) => [l.lat + ',' + l.lon, l])).values()];
     return {
-      from: new Date(start).toISOString(), to: new Date(to).toISOString(), allTime: !from,
+      from: new Date(start).toISOString(),
+      to: new Date(to).toISOString(),
+      allTime: !from,
       // Rooms without a known location are still returned (located: false) so counts are right and they can be listed.
-      rooms: [...rooms.values()].map(x => ({ ...x, cameras: dedupe(x.cameras), viewers: dedupe(x.viewers), located: !!(x.cameras.length || x.viewers.length) })),
+      rooms: [...rooms.values()].map((x) => ({
+        ...x,
+        cameras: dedupe(x.cameras),
+        viewers: dedupe(x.viewers),
+        located: !!(x.cameras.length || x.viewers.length),
+      })),
     };
   }
 
   /** Close everything this process has open (graceful shutdown). */
   async function close() {
     clearInterval(pruneTimer);
-    try { await ensureSchema(); await pool.query(`update room_presence set left_at = now() where left_at is null and server_id = $1`, [serverId]); } catch {}
-    try { await pool.end(); } catch {}
+    try {
+      await ensureSchema();
+      await pool.query(`update room_presence set left_at = now() where left_at is null and server_id = $1`, [serverId]);
+    } catch {}
+    try {
+      await pool.end();
+    } catch {}
   }
 
-  ensureSchema().catch(e => console.log('[activity] database not reachable yet:', e.message));
-  return { enabled: true, join, leave, roomAnalytics, connectionMap, close, _pool: pool, _flushed: async () => { while (queue.length || flushing) await new Promise(r => setTimeout(r, 20)); } };
+  ensureSchema().catch((e) => console.log('[activity] database not reachable yet:', e.message));
+  return {
+    enabled: true,
+    join,
+    leave,
+    roomAnalytics,
+    connectionMap,
+    close,
+    _pool: pool,
+    _flushed: async () => {
+      while (queue.length || flushing) await new Promise((r) => setTimeout(r, 20));
+    },
+  };
 }
