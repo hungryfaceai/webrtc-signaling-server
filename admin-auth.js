@@ -123,6 +123,17 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
   }
   setInterval(() => { const cut = now() - 3600 * 1000; for (const [ip, f] of failures) if (f.last < cut && f.lockedUntil < now()) failures.delete(ip); }, 600000).unref?.();
 
+  // One password check at a time: each scrypt run needs ~128 MiB, so parallel attempts could exhaust
+  // the server's memory. Attempts queue behind each other (and the queue is capped).
+  let verifyChain = Promise.resolve(), queued = 0;
+  const MAX_QUEUED = 10;
+  function verifySerial(password) {
+    const run = verifyChain.then(() => verifyPassword(password, parsed));
+    verifyChain = run.catch(() => {});
+    return run;
+  }
+  const inFlight = new Map();   // ip -> attempts not yet decided
+
   /** Express handler for POST /admin/login */
   async function login(req, res) {
     res.set('Cache-Control', 'no-store');
@@ -131,9 +142,19 @@ export function createAdminAuth(env = process.env, { now = () => Date.now(), log
     const wait = lockedFor(ip);
     if (wait) { res.set('Retry-After', String(wait)); return res.status(429).json({ error: `Too many attempts. Try again in ${wait} s.` }); }
     if (!globalAllowed()) { res.set('Retry-After', '60'); return res.status(429).json({ error: 'Too many sign-in attempts. Try again in a minute.' }); }
+    // Attempts still being checked count against the free allowance, so a burst can't slip past the lockout.
+    const pending = inFlight.get(ip) || 0;
+    const f = failures.get(ip);
+    if ((f ? f.count : 0) + pending >= PER_IP_FREE) { res.set('Retry-After', '30'); return res.status(429).json({ error: 'Too many attempts. Try again in 30 s.' }); }
+    if (queued >= MAX_QUEUED) { res.set('Retry-After', '10'); return res.status(429).json({ error: 'The server is busy. Try again in a few seconds.' }); }
     const password = req.body && typeof req.body.password === 'string' ? req.body.password : '';
     let ok = false;
-    try { ok = await verifyPassword(password, parsed); } catch (e) { log.warn('[admin] verify error', e?.message || e); }
+    inFlight.set(ip, pending + 1); queued++;
+    try { ok = await verifySerial(password); } catch (e) { log.warn('[admin] verify error', e?.message || e); }
+    finally {
+      queued--;
+      const n = (inFlight.get(ip) || 1) - 1; if (n > 0) inFlight.set(ip, n); else inFlight.delete(ip);
+    }
     if (!ok) {
       recordFailure(ip);
       log.log(`[admin] sign-in FAILED ip=${ip}`);           // never log the password

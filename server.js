@@ -117,7 +117,7 @@ setInterval(() => {
 app.post('/admin/login', express.json({ limit: '2kb' }), (req, res) => adminAuth.login(req, res));
 app.get('/admin/config', (_req, res) => {
   res.set('Cache-Control', 'no-store');
-  res.json({ password: adminAuth.passwordEnabled, legacyKey: adminAuth.legacyEnabled });
+  res.json({ password: adminAuth.passwordEnabled });   // whether the old static key is on is not public
 });
 
 // Admin-only roster of active rooms (used by utils/rooms and utils/roster).
