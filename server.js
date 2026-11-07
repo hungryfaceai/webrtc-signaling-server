@@ -125,7 +125,7 @@ app.get('/rooms', (req, res) => {
   if (!adminAuth.enabled) return res.status(404).send('Not found');
   if (!adminAuth.authorized(req)) return res.status(401).send('Unauthorized');
   res.set('Cache-Control', 'no-store');
-  const json = {};
+  const json = Object.create(null);   // a room named "__proto__" must still be listed
   for (const [room, set] of rooms) json[room] = [...set].map(ws => ({ id: ws.id, role: ws.role }));
   res.json(json);
 });
@@ -235,7 +235,15 @@ wss.on('connection', (ws, req) => {
 
     // ===== ROOMLESS FLOW (no join needed) =====
     // 1) Register fingerprint
-    if (t === 'register' && typeof msg.fp === 'string' && msg.fp.length <= MAX_ID_LEN) {
+    if (t === 'register' && typeof msg.fp === 'string' && msg.fp && msg.fp.length <= MAX_ID_LEN) {
+      // A fingerprint already held by another live connection can't be taken over (it would steal its messages).
+      const holder = fpClients.get(msg.fp);
+      if (holder && holder !== ws && holder.readyState === WebSocket.OPEN) {
+        try { ws.send(JSON.stringify({ type: 'error', reason: 'fp-in-use' })); } catch {}
+        return;
+      }
+      // One fingerprint per connection: drop the previous one so the map can't grow without bound.
+      if (ws.fingerprint && ws.fingerprint !== msg.fp && fpClients.get(ws.fingerprint) === ws) fpClients.delete(ws.fingerprint);
       ws.fingerprint = msg.fp;
       fpClients.set(ws.fingerprint, ws);
       // flush mailbox
@@ -266,7 +274,8 @@ wss.on('connection', (ws, req) => {
     if (t === 'join' && typeof msg.room === 'string') {
       const nextRoom = msg.room.trim();
       const prevRoom = ws.roomId;
-      if (!nextRoom || nextRoom.length > MAX_ID_LEN) return;
+      // Control characters (e.g. NUL) are never valid in a room name, and the history database rejects them.
+      if (!nextRoom || nextRoom.length > MAX_ID_LEN || /[\u0000-\u001f\u007f]/.test(nextRoom)) return;
       if (nextRoom !== prevRoom && (rooms.get(nextRoom)?.size || 0) >= MAX_ROOM_PEERS) {
         console.log(`[JOIN] REJECT id=${ws.id} room=${nextRoom} (full)`);
         try { ws.send(JSON.stringify({ type: 'error', reason: 'room-full' })); } catch {}

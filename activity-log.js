@@ -98,7 +98,12 @@ export function createActivityLog({ url = process.env.ACTIVITY_DATABASE_URL || p
     try {
       while (queue.length) {
         try { await ensureSchema(); await queue[0](); queue.shift(); }
-        catch (e) { console.log('[activity] write failed, will retry:', e.message); await new Promise(r => setTimeout(r, 5000)); }
+        catch (e) {
+          // Data/constraint errors (Postgres classes 22 and 23) will fail forever: drop that event so it
+          // can't block every write behind it. Anything else (connection, timeout) is retried.
+          if (/^2[23]/.test(String(e && e.code || ''))) { console.log('[activity] dropped an event the database rejected:', e.message); queue.shift(); continue; }
+          console.log('[activity] write failed, will retry:', e.message); await new Promise(r => setTimeout(r, 5000));
+        }
       }
     } finally { flushing = false; }
   }
